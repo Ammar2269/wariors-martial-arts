@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Wariors Admin</title>
+  <link rel="icon" href="../favicon.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Oswald:wght@600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <div id="boot" class="boot">Loading…</div>
+
+  <div id="login" class="login" hidden>
+    <div class="login-card">
+      <img src="../images/logo.png" alt="Wariors Martial Arts Club" width="206" height="61">
+      <h1>Club admin</h1>
+      <div id="login-body"></div>
+    </div>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <aside class="side" id="side">
+      <a class="side-brand" href="#dashboard"><img src="../images/logo.png" alt="Wariors Martial Arts Club" width="206" height="61"></a>
+      <nav class="side-nav" id="side-nav" aria-label="Admin sections"></nav>
+      <div class="side-foot">
+        <div class="who" id="who"></div>
+        <button class="btn ghost-dark small" id="sign-out" type="button">Sign out</button>
+        <a class="side-link" href="../" target="_blank" rel="noopener">View website ↗</a>
+      </div>
+    </aside>
+    <div class="side-scrim" id="side-scrim"></div>
+
+    <div class="main">
+      <header class="top">
+        <button class="icon-btn menu" id="menu" type="button" aria-label="Open menu">☰</button>
+        <h1 id="page-title">Dashboard</h1>
+        <div class="top-actions">
+          <button class="btn" type="button" data-act="checkin">Check in</button>
+          <button class="btn" type="button" data-act="new-expense">+ Expense</button>
+          <button class="btn primary" type="button" data-act="new-payment">+ Payment</button>
+        </div>
+      </header>
+      <div id="banner"></div>
+      <main id="view" class="view" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script type="module" src="admin.js"></script>
+</body>
+</html>
