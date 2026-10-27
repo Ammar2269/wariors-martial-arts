@@ -130,13 +130,14 @@ export const store = {
     if (MODE === "demo") return;
     await fb.au.sendPasswordResetEmail(fb.auth, email);
   },
-  async isAdmin(user) {
+  // Staff are whoever the security rules let read the settings; only "permission denied" means no.
+  async isAdmin() {
     if (MODE === "demo") return true;
     try {
-      const snap = await fb.fs.getDoc(fb.fs.doc(fb.db, "admins", user.uid));
-      return snap.exists();
-    } catch {
-      return false;
+      await fb.fs.getDocFromServer(fb.fs.doc(fb.db, "settings", "main"));
+      return true;
+    } catch (e) {
+      return e?.code !== "permission-denied";
     }
   },
 

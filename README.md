@@ -36,8 +36,8 @@ Use a dedicated Google account for the club's system (not a personal one), so it
 1. https://console.firebase.google.com → **Add project** (e.g. `wariors-admin`). Analytics: off.
 2. **Build → Firestore Database → Create database** → production mode → location `me-central1`.
 3. **Build → Authentication → Get started → Email/Password → Enable.**
-4. **Authentication → Users → Add user**: email `wariors@<project-id>.firebaseapp.com`, plus a strong password. Copy the **User UID**.
-5. **Firestore → Start collection** `admins` → Document ID = that UID → field `name: "Shared staff login"` → Save.
+4. **Authentication → Users → Add user**: email `wariors@<project-id>.firebaseapp.com`, plus a strong password. Also turn off **Settings → User actions → Enable create (sign-up)** so nobody can make their own login.
+5. `firestore.rules` already treats that email as staff. Extra logins (if ever needed) go in a Firestore collection `admins` with the user's UID as the document ID.
 6. **Firestore → Rules**: paste `firestore.rules` → **Publish**.
 7. **Project settings → Your apps → Web (`</>`)** → copy the config values into `js/firebase-config.js`.
 8. **Authentication → Settings → Authorized domains**: add the site's domain (e.g. `wariors-admin.netlify.app`).

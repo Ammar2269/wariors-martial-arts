@@ -5,10 +5,14 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // A signed-in user is staff only if admins/{their UID} exists.
+    // Staff = the shared login (username "wariors"), or any extra login listed in admins/{UID}.
+    // Self sign-up is switched off in Firebase Authentication, so these accounts can only be
+    // created by the project owner in the Firebase console.
     function isAdmin() {
-      return request.auth != null
-        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+      return request.auth != null && (
+        request.auth.token.email == 'wariors@wariors-admin.firebaseapp.com'
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
     }
 
     // Staff list. Managed in the Firebase console; each user may only check their own entry.

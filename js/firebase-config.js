@@ -1,14 +1,13 @@
-// Firebase web app config. Paste the values from:
-// Firebase console → Project settings → General → Your apps → (web app) → SDK setup and configuration → Config.
+// Firebase web app config for the club's project (wariors-admin).
+// From: Firebase console → Project settings → General → Your apps → Wariors admin → Config.
+// These values are not secret; firestore.rules is what protects the data.
 //
-// While apiKey is empty the dashboard runs in DEMO MODE: it opens without a password and saves data
-// only in that browser. Fill it in (and publish firestore.rules) to switch to the shared database
-// with the staff login. These values are not secret; the security rules protect the data. See README.md.
+// With an empty apiKey the dashboard runs in DEMO MODE (no login, made-up data saved only in that browser).
 export const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+  apiKey: "AIzaSyB4qKfHw_EC2b-cFPbLeT5KgCz7N7JuCH8",
+  authDomain: "wariors-admin.firebaseapp.com",
+  projectId: "wariors-admin",
+  storageBucket: "wariors-admin.firebasestorage.app",
+  messagingSenderId: "709386234723",
+  appId: "1:709386234723:web:714490bc9f0d5fa98fc156"
 };
