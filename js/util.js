@@ -28,6 +28,14 @@ export function daysInMonth(ym) {
   const [y, m] = ym.split("-").map(Number);
   return new Date(y, m, 0).getDate();
 }
+export const diffDays = (a, b) => Math.round((new Date(b.slice(0, 10) + "T00:00:00") - new Date(a.slice(0, 10) + "T00:00:00")) / 864e5);
+// 31 Jan + 1 month = 28/29 Feb (the day is clamped to the month's length).
+export function addMonthsISO(iso, n) {
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  const t = new Date(y, m - 1 + n, 1);
+  const last = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+  return todayISO(new Date(t.getFullYear(), t.getMonth(), Math.min(d, last)));
+}
 export function addDays(iso, n) {
   const d = new Date(iso.slice(0, 10) + "T00:00:00");
   d.setDate(d.getDate() + n);

@@ -223,10 +223,15 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .toast.error { background: var(--bad); }
 @keyframes pop { from { transform: translateY(8px); opacity: 0; } }
 
-/* Settings editors */
-.rows-edit .row { display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 8px; margin-bottom: 8px; align-items: center; }
-.rows-edit.bills .row { grid-template-columns: 2fr 1.4fr 1fr .7fr auto; }
-@media (max-width: 700px) { .rows-edit .row, .rows-edit.bills .row { grid-template-columns: 1fr 1fr; } }
+/* Settings editors (column layout comes from --cols on the container) */
+.rows-edit .row { display: grid; grid-template-columns: var(--cols, 2fr 1fr 1fr auto); gap: 8px; margin-bottom: 8px; align-items: center; }
+.save-bar { position: sticky; bottom: 0; z-index: 5; padding: 12px 0; background: linear-gradient(transparent, var(--bg) 30%); }
+.t.week td { vertical-align: top; min-width: 120px; }
+@media (max-width: 700px) {
+  .rows-edit .row { grid-template-columns: 1fr 1fr; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+  .rows-edit .row > :first-child { grid-column: 1 / -1; }
+  .save-bar { bottom: calc(64px + env(safe-area-inset-bottom)); }
+}
 
 /* Receipt */
 .receipt { font-size: 14px; }
@@ -242,4 +247,80 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   body.printing .modal-backdrop { position: static; background: none; padding: 0; }
   body.printing .modal { box-shadow: none; max-height: none; width: 100%; }
   body.printing .modal > header, body.printing .modal-body > footer { display: none; }
+}
+
+/* Quick-add sheet */
+.quick-grid { display: grid; gap: 10px; }
+.quick-grid .btn { padding: 14px; font-size: 15px; }
+
+/* Phone layout: bottom tab bar, "+" button, tables as cards, bottom-sheet dialogs */
+.bottom-nav, .fab { display: none; }
+@media (max-width: 700px) {
+  body { font-size: 15px; }
+  input, select, textarea { font-size: 16px; } /* stops iPhone zooming into fields */
+  .top { padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); }
+  .top h1 { font-size: 18px; }
+  .top-actions { display: none; }
+  .view { padding: 14px 12px calc(150px + env(safe-area-inset-bottom)); }
+  .banner { margin: 10px 12px 0; }
+
+  .bottom-nav {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    background: var(--side); border-top: 1px solid #222228;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .bottom-nav a, .bottom-nav button {
+    position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 9px 0 8px; color: var(--side-text); font: 500 11px/1 "Inter", system-ui, sans-serif;
+    text-decoration: none; background: none; border: 0; cursor: pointer;
+  }
+  .bottom-nav svg { width: 22px; height: 22px; }
+  .bottom-nav .active { color: #f07a3e; }
+  .bottom-nav .dot { position: absolute; top: 4px; left: 56%; background: #f07a3e; color: #160a03; font-style: normal; font-size: 10px; font-weight: 700; border-radius: 999px; padding: 1px 5px; }
+  .fab {
+    display: grid; place-items: center; position: fixed; z-index: 41;
+    right: 16px; bottom: calc(74px + env(safe-area-inset-bottom));
+    width: 56px; height: 56px; border-radius: 50%; border: 0;
+    background: var(--brand); color: #fff; font-size: 30px; line-height: 1; cursor: pointer;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, .35);
+  }
+  .toasts { left: 12px; right: 12px; bottom: calc(140px + env(safe-area-inset-bottom)); }
+  .toast { max-width: none; }
+
+  .kpis { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .kpi { padding: 12px; }
+  .kpi .value { font-size: 18px; }
+  .toolbar { gap: 8px; }
+  .toolbar input[type="search"] { max-width: none; flex: 1 1 100%; order: -1; }
+  .toolbar .spacer { display: none; }
+  .seg { display: flex; width: 100%; overflow-x: auto; }
+  .seg button { flex: 1 0 auto; padding: 9px 10px; }
+  .btn { padding: 10px 14px; }
+  .btn.small { padding: 8px 12px; font-size: 13px; }
+  .panel-head { padding: 12px 14px; }
+  .list li { padding: 12px 14px; }
+
+  /* Each table row becomes a card: first cell is the title, the rest are "label … value" lines. */
+  table.t, .t thead, .t tbody, .t tfoot, .t tr, .t td { display: block; width: 100%; }
+  .t thead { display: none; }
+  .t tr { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .t tbody tr:hover td { background: none; }
+  .t td { border: 0; padding: 3px 0; text-align: right; overflow: hidden; }
+  .t td::before { content: attr(data-label); float: left; margin-right: 12px; color: var(--muted); font-size: 12.5px; font-weight: 500; }
+  .t td:first-child { text-align: left; font-size: 15.5px; padding-bottom: 6px; }
+  .t td:first-child::before, .t td[data-label=""]::before, .t td.actions::before { display: none; }
+  .t td.actions { text-align: left; white-space: normal; padding-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .t .actions .btn + .btn { margin-left: 0; }
+  .t .num { text-align: right; }
+  .t tfoot tr { background: var(--panel-2); }
+
+  .modal-backdrop { padding: 0; place-items: end stretch; }
+  .modal, .modal.wide { width: 100%; max-height: 94vh; border-radius: 16px 16px 0 0; }
+  .modal > header { padding: 14px 16px; }
+  .modal-body { padding: 16px 16px 0; }
+  .modal-body > footer { position: sticky; bottom: 0; background: var(--panel); margin: 18px -16px 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .modal-body > footer .btn { flex: 1 1 auto; }
+  .modal-body > footer .left { margin-right: 0; flex-basis: 100%; }
+  .dl { grid-template-columns: 1fr 1fr; }
 }

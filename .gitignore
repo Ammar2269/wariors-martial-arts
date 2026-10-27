@@ -4,3 +4,14 @@ desktop.ini
 node_modules/
 .firebase/
 *.log
+.netlify/
+
+# Real club data must never be committed (this repo is public).
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.json
+!manifest.webmanifest
+private/
+data/

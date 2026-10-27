@@ -1,11 +1,11 @@
-// Data layer shared by the website's trial form and the admin dashboard.
+// Data layer for the admin dashboard.
 // With a config in firebase-config.js it uses Firebase Auth + Firestore.
 // Without one it runs in demo mode and keeps everything in this browser's localStorage.
 import { firebaseConfig } from "./firebase-config.js";
 
 export const MODE = firebaseConfig && firebaseConfig.apiKey ? "firebase" : "demo";
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
-export const COLLECTIONS = ["members", "payments", "expenses", "equipment", "leads", "attendance", "activity"];
+export const COLLECTIONS = ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts", "attendance", "activity"];
 
 // ---------- Firebase ----------
 let fb = null;
@@ -37,6 +37,13 @@ function normalize(id, data) {
   const out = { id };
   for (const [k, v] of Object.entries(data)) out[k] = v && typeof v.toDate === "function" ? v.toDate().toISOString() : v;
   return out;
+}
+
+// Staff sign in with a plain username; Firebase needs an email, so "wariors" becomes
+// "wariors@<project>.firebaseapp.com". A full email address is used as typed.
+export function loginEmail(username) {
+  const u = String(username || "").trim().toLowerCase();
+  return u.includes("@") ? u : `${u}@${firebaseConfig.authDomain}`;
 }
 
 function clean(obj) {
@@ -100,8 +107,16 @@ export const store = {
       store._demoAuthCb && store._demoAuthCb(user);
       return user;
     }
-    const cred = await fb.au.signInWithEmailAndPassword(fb.auth, email, password);
+    const cred = await fb.au.signInWithEmailAndPassword(fb.auth, loginEmail(email), password);
     return cred.user;
+  },
+  // For the shared staff login: re-checks the current password, then sets the new one.
+  async changePassword(current, next) {
+    if (MODE === "demo") throw new Error("There's no password in demo mode.");
+    const u = fb.auth.currentUser;
+    const cred = fb.au.EmailAuthProvider.credential(u.email, current);
+    await fb.au.reauthenticateWithCredential(u, cred);
+    await fb.au.updatePassword(u, next);
   },
   async signOut() {
     if (MODE === "demo") {
@@ -230,25 +245,5 @@ export const store = {
     if (MODE !== "demo") return;
     localStorage.removeItem(LS_KEY);
     queueMicrotask(() => demoListeners.forEach(fn => fn()));
-  },
-
-  // Website free-trial form (no login). Firestore rules only allow this exact shape.
-  async addPublicLead(lead) {
-    const data = {
-      name: String(lead.name || "").slice(0, 100),
-      phone: String(lead.phone || "").slice(0, 30),
-      program: String(lead.program || "").slice(0, 60),
-      ageGroup: String(lead.ageGroup || "").slice(0, 60),
-      preferredTime: String(lead.preferredTime || "").slice(0, 40),
-      message: String(lead.message || "").slice(0, 1000),
-      source: "Website",
-      status: "New"
-    };
-    if (MODE === "demo") {
-      return store.add("leads", { ...data, createdAt: new Date().toISOString() });
-    }
-    await loadFirebase({ auth: false });
-    const ref = await fb.fs.addDoc(fb.fs.collection(fb.db, "leads"), { ...data, createdAt: fb.fs.serverTimestamp() });
-    return ref.id;
   }
 };
