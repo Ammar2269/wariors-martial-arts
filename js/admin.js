@@ -1,7 +1,7 @@
-// Wariors admin dashboard: members, memberships & renewals, payments, expenses & bills, class schedule,
+// Wariors admin dashboard: members, memberships & renewals, payments, receipt photos, expenses & bills, class schedule,
 // equipment & stock, trial requests, attendance, reports and an automatic activity log.
 // Data lives in Firestore (or localStorage in demo mode).
-import { store, MODE, COLLECTIONS } from "./store.js";
+import { store, MODE, COLLECTIONS, PHOTOS } from "./store.js";
 import * as U from "./util.js";
 
 const { esc, sum, fmtDate, fmtMonth, options } = U;
@@ -34,6 +34,9 @@ const DEFAULT_SETTINGS = {
   renewWindow: 7,
   reminderText: "Hi {name}, this is {club}. Your membership ended on {date}. We'd love to see you back on the mat! The renewal is {amount}. Thank you!",
   balanceText: "Hi {name}, this is {club}. A friendly reminder that {amount} is still due for {what}. Thank you!",
+  cancelText: "Hi {name}, this is {club}. Your membership ended on {date} and we have it as cancelled. Could you let us know if you want to cancel for sure, or would you like to renew? Just reply CANCEL or RENEW. We'd love to have you back on the mat!",
+  accountantName: "Accountant group",
+  accountantLink: "",
   plans: [],
   extraFees: [],
   schedule: [],
@@ -46,12 +49,13 @@ const S = {
   user: null,
   settings: structuredClone(DEFAULT_SETTINGS),
   loaded: new Set(),
-  members: [], memberships: [], payments: [], expenses: [], equipment: [], leads: [], handouts: [], attendance: [], activity: [],
+  members: [], memberships: [], payments: [], expenses: [], equipment: [], leads: [], handouts: [], attendance: [], activity: [], receipts: [],
   route: "dashboard",
   loginMsg: "",
   ui: {
     mq: "", mfilter: "current", mprog: "",
     payTab: "renewals", payMonth: U.thisMonth(), payQ: "",
+    rcFilter: "unsent", rcSel: [], rcType: "", rcKind: "in",
     expMonth: U.thisMonth(), expCat: "",
     eqQ: "", eqCond: "",
     leadFilter: "open",
@@ -153,6 +157,9 @@ function remindLink(m, kind, label = "Remind") {
   if (kind === "renewal") {
     const ms = latestOf(m.id);
     text = fill(S.settings.reminderText || DEFAULT_SETTINGS.reminderText, { name: greetName(m), club: S.settings.clubName, date: fmtDate(ms?.endDate), amount: money(ms?.packageAmount) });
+  } else if (kind === "cancel") {
+    const ms = latestOf(m.id);
+    text = fill(S.settings.cancelText || DEFAULT_SETTINGS.cancelText, { name: greetName(m), club: S.settings.clubName, date: fmtDate(ms?.endDate || m.cancelDate), amount: money(ms?.packageAmount) });
   } else {
     const o = owedOf(m);
     text = fill(S.settings.balanceText || DEFAULT_SETTINGS.balanceText, { name: greetName(m), club: S.settings.clubName, amount: money(o.total), what: o.list.map(x => x.ms.kind === "charge" ? x.ms.description : x.ms.plan || "your membership").join(", ") });
@@ -160,6 +167,15 @@ function remindLink(m, kind, label = "Remind") {
   const url = U.waLink(m.phone || m.guardianPhone, text);
   return url ? `<a class="btn small wa" href="${esc(url)}" target="_blank" rel="noopener" data-act="remind" data-id="${esc(m.id)}" data-kind="${kind}">${label}</a>` : "";
 }
+
+// Cancelled members: has someone asked them yet whether they really want to cancel, and what did they say?
+const ANSWERS = { renew: "Wants to renew", cancel: "Confirmed cancel", none: "No reply" };
+function askState(m) {
+  if (m.cancelAnswer) return badge(m.cancelAnswer === ANSWERS.renew ? "b-ok" : m.cancelAnswer === ANSWERS.cancel ? "b-mute" : "b-warn", m.cancelAnswer);
+  if (m.cancelAskedAt) return badge("b-info", `Asked ${fmtDate(m.cancelAskedAt)}`);
+  return badge("b-warn", "Not asked yet");
+}
+const notAskedYet = () => S.members.filter(m => m.status === "cancelled" && !m.cancelAskedAt && !m.cancelAnswer);
 
 // ---------- Bills (recurring expenses from Settings) ----------
 function billRows(ym) {
@@ -275,6 +291,7 @@ function startApp() {
     scheduleRender();
   }, opts, onErr));
   ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts"].forEach(c => sub(c));
+  sub("receipts", { orderBy: ["createdAt", "desc"], limit: 400 });
   sub("attendance", { since: { field: "date", value: U.addDays(U.todayISO(), -120) } });
   sub("activity", { orderBy: ["at", "desc"], limit: 300 });
   unsubs.push(store.subscribeDoc("settings", "main", d => {
@@ -292,6 +309,7 @@ const ICONS = {
   dashboard: "M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z",
   members: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8",
   payments: "M2 5h20v14H2zM2 10h20M6 15h4",
+  receipts: "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
   expenses: "M5 2h14v20l-3-2-2 2-2-2-2 2-2-2-3 2zM9 7h6M9 11h6M9 15h3",
   schedule: "M3 4h18v18H3zM16 2v4M8 2v4M3 10h18M8 14h3M8 18h3M14 14h3",
   equipment: "M6.5 6.5h11M6.5 17.5h11M3 9v6M21 9v6M6.5 4v16M17.5 4v16",
@@ -303,7 +321,7 @@ const ICONS = {
   more: "M4 6h16M4 12h16M4 18h16"
 };
 const ROUTES = [
-  ["dashboard", "Dashboard"], ["members", "Members"], ["payments", "Payments & renewals"], ["expenses", "Expenses & bills"],
+  ["dashboard", "Dashboard"], ["members", "Members"], ["payments", "Payments & renewals"], ["receipts", "Receipts & vouchers"], ["expenses", "Expenses & bills"],
   ["schedule", "Class schedule"], ["equipment", "Equipment & stock"], ["leads", "Trial requests"], ["attendance", "Attendance"],
   ["reports", "Reports & cash book"], ["activity", "Activity log"], ["settings", "Settings"]
 ];
@@ -319,6 +337,7 @@ function navCounts() {
   const ym = U.thisMonth();
   return {
     payments: renewalsDue().length,
+    receipts: S.receipts.filter(r => !r.sentAt).length,
     leads: S.leads.filter(l => l.status === "New").length,
     expenses: billRows(ym).filter(b => b.overdue).length + S.expenses.filter(x => x.status === "unpaid" && x.dueDate && x.dueDate < U.todayISO()).length
   };
@@ -333,7 +352,7 @@ function renderNav() {
   const inBottom = BOTTOM.some(b => b[0] === S.route);
   $("bottom-nav").innerHTML = BOTTOM.map(([id, label]) =>
     `<a href="#${id}" class="${S.route === id ? "active" : ""}">${icon(id)}<span>${label}</span>${c[id] ? `<i class="dot">${c[id]}</i>` : ""}</a>`
-  ).join("") + `<button type="button" class="${inBottom ? "" : "active"}" data-act="more">${icon("more")}<span>More</span>${c.leads || c.expenses ? `<i class="dot">${c.leads + c.expenses}</i>` : ""}</button>`;
+  ).join("") + `<button type="button" class="${inBottom ? "" : "active"}" data-act="more">${icon("more")}<span>More</span>${c.leads + c.expenses + c.receipts ? `<i class="dot">${c.leads + c.expenses + c.receipts}</i>` : ""}</button>`;
 }
 
 // On phones, tables are shown as cards; each cell needs its column name as a label.
@@ -443,6 +462,8 @@ function viewDashboard() {
   const eq = S.equipment.filter(e => e.condition === "Needs repair" || (e.serviceDue && e.serviceDue <= soon && e.condition !== "Retired"));
   const outOfStock = S.equipment.filter(e => e.forSale && num(e.qty) <= 0);
   const pauseEnded = S.members.filter(m => m.status === "paused" && m.pauseUntil && m.pauseUntil < U.todayISO());
+  const toAsk = notAskedYet().length;
+  const unsent = S.receipts.filter(r => !r.sentAt).length;
   const chart = Array.from({ length: 6 }, (_, i) => { const m = U.addMonths(ym, i - 5); return { label: fmtMonth(m).slice(0, 3), a: incomeIn(m), b: spentIn(m) }; });
 
   return `
@@ -477,8 +498,10 @@ function viewDashboard() {
             ${unpaidInv.map(x => `<li><div class="grow">${esc(x.description || x.category)}<span class="sub">${esc(x.vendor || "")} · due ${fmtDate(x.dueDate)}</span></div><b>${money(x.amount)}</b><button class="btn small" data-act="pay-expense" data-id="${esc(x.id)}">Pay</button></li>`).join("")}</ul>`
             : (S.settings.bills || []).length ? empty("All bills for this month are paid.") : empty(`No monthly bills set up yet. <a href="#settings">Add rent, utilities…</a>`)}
         </div>
-        ${eq.length || pauseEnded.length || outOfStock.length || newLeads ? `<div class="panel"><div class="panel-head"><h2>Needs attention</h2></div><ul class="list">
+        ${eq.length || pauseEnded.length || outOfStock.length || newLeads || toAsk || unsent ? `<div class="panel"><div class="panel-head"><h2>Needs attention</h2></div><ul class="list">
+          ${unsent ? `<li><div class="grow">${unsent} receipt photo${unsent === 1 ? "" : "s"}<span class="sub">not sent to the accountant yet</span></div><a class="btn small" href="#receipts" data-act="ui" data-id="rcFilter=unsent">Send</a></li>` : ""}
           ${newLeads ? `<li><div class="grow">${newLeads} new trial request${newLeads === 1 ? "" : "s"}<span class="sub">not contacted yet</span></div><a class="btn small" href="#leads">Open</a></li>` : ""}
+          ${toAsk ? `<li><div class="grow">${toAsk} cancelled member${toAsk === 1 ? "" : "s"}<span class="sub">not asked yet if they want to renew</span></div><a class="btn small" href="#members" data-act="ui" data-id="mfilter=cancelled">Open</a></li>` : ""}
           ${eq.map(e => `<li><div class="grow">${esc(e.name)}<span class="sub">${e.condition === "Needs repair" ? "Needs repair" : "Service due " + fmtDate(e.serviceDue)}</span></div><button class="btn small" data-act="edit-eq" data-id="${esc(e.id)}">Update</button></li>`).join("")}
           ${outOfStock.length ? `<li><div class="grow">Out of stock<span class="sub">${esc(outOfStock.map(e => e.name).join(", "))}</span></div><a class="btn small" href="#equipment">Stock</a></li>` : ""}
           ${pauseEnded.map(m => `<li><div class="grow">${esc(m.name)}<span class="sub">Pause ended ${fmtDate(m.pauseUntil)}</span></div><button class="btn small" data-act="resume-member" data-id="${esc(m.id)}">Resume</button></li>`).join("")}
@@ -533,6 +556,14 @@ function viewMembers() {
     .filter(r => !mprog || (r.m.programs || []).includes(mprog))
     .filter(r => !q || [r.m.name, r.m.phone, r.m.email, r.m.guardianName, r.m.guardianPhone].some(v => (v || "").toLowerCase().includes(q)))
     .sort((a, b) => byName(a.m, b.m));
+  const cancelled = mfilter === "cancelled" ? S.members.filter(m => m.status === "cancelled") : [];
+  const count = fn => cancelled.filter(fn).length;
+  const askHelp = mfilter === "cancelled" && cancelled.length ? `<div class="callout info">Send each cancelled member a WhatsApp message to check if they want to cancel for sure or renew, then note their answer on their page.
+      <b>${count(m => !m.cancelAskedAt && !m.cancelAnswer)}</b> not asked yet · <b>${count(m => m.cancelAskedAt && !m.cancelAnswer)}</b> waiting for a reply · <b>${count(m => m.cancelAnswer === ANSWERS.renew)}</b> want to renew · <b>${count(m => m.cancelAnswer === ANSWERS.cancel)}</b> confirmed.
+      ${count(m => !U.waNumber(m.phone || m.guardianPhone)) ? `${count(m => !U.waNumber(m.phone || m.guardianPhone))} have no phone number yet: open them and tap Edit to add one.` : ""}</div>` : "";
+  const actions = (m, st, o) => m.status === "cancelled"
+    ? `${remindLink(m, "cancel", m.cancelAskedAt ? "Ask again" : "Ask: cancel or renew?") || `<button class="btn small" data-act="edit-member" data-id="${esc(m.id)}">Add phone</button>`}<button class="btn small" data-act="renew" data-id="${esc(m.id)}">Re-join</button>`
+    : `<button class="btn small primary" data-act="renew" data-id="${esc(m.id)}">${st.ms ? "Renew" : "Start"}</button>${o.total ? `<button class="btn small" data-act="pay-member" data-id="${esc(m.id)}">Pay</button>` : ""}`;
   return `
     <div class="toolbar">
       <input type="search" id="m-search" placeholder="Search name or phone…" value="${esc(mq)}" data-ui="mq">
@@ -542,18 +573,20 @@ function viewMembers() {
       <button class="btn" data-act="export" data-id="members">Export to Excel</button>
       <button class="btn primary" data-act="new-member">+ Add member</button>
     </div>
+    ${askHelp}
     <div class="panel">${rows.length ? `<div class="table-wrap"><table class="t"><thead><tr>
-      <th>Member</th><th>Programs</th><th>Membership</th><th>Status</th><th class="num">Owes</th><th>Last payment</th><th></th></tr></thead><tbody>
+      <th>Member</th><th>Programs</th><th>Joined</th><th>Membership</th><th>Status</th><th class="num">Owes</th><th>Last payment</th><th></th></tr></thead><tbody>
       ${rows.map(({ m, st, o }) => {
         const last = paymentsOf(m.id)[0];
         return `<tr class="clickable" data-act="member" data-id="${esc(m.id)}">
           <td>${memberCell(m)}</td>
           <td>${esc((m.programs || []).join(", ") || "—")}</td>
+          <td>${fmtDate(m.joinDate)}</td>
           <td>${st.ms ? `${esc(st.ms.plan || "Membership")}<span class="sub">${fmtDate(st.ms.startDate)} – ${fmtDate(st.ms.endDate)}</span>` : "—"}</td>
-          <td>${stateBadge(st)}${m.status === "cancelled" && m.cancelReason ? `<span class="sub">${esc(m.cancelReason)}</span>` : ""}</td>
+          <td>${stateBadge(st)}${m.status === "cancelled" ? ` ${askState(m)}${m.cancelReason ? `<span class="sub">${esc(m.cancelReason)}</span>` : ""}` : ""}</td>
           <td class="num">${o.total ? `<b style="color:var(--bad)">${money(o.total)}</b>` : "—"}</td>
           <td>${last ? `${fmtDate(last.date)}<span class="sub">${money(last.amount)}</span>` : "—"}</td>
-          <td class="actions">${m.status !== "cancelled" ? `<button class="btn small primary" data-act="renew" data-id="${esc(m.id)}">${st.ms ? "Renew" : "Start"}</button>` : ""}${o.total ? `<button class="btn small" data-act="pay-member" data-id="${esc(m.id)}">Pay</button>` : ""}</td></tr>`;
+          <td class="actions">${actions(m, st, o)}</td></tr>`;
       }).join("")}</tbody></table></div>` : empty(S.members.length ? "No members match." : "No members yet.")}</div>`;
 }
 
@@ -578,8 +611,9 @@ function viewPayments() {
       ${owing.length ? owedTable(owing) : empty("Nobody owes anything.")}</div>`;
   } else {
     const q = S.ui.payQ.toLowerCase();
+    const photoOf = receiptsByPayment();
     const pays = S.payments.filter(p => (p.date || "").startsWith(ym))
-      .filter(p => !q || (p.memberName || p.payerName || "").toLowerCase().includes(q))
+      .filter(p => !q || [p.memberName, p.payerName, p.bookNo, p.receipt].some(v => String(v || "").toLowerCase().includes(q)))
       .sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.receipt || "").localeCompare(a.receipt || ""));
     const byMethod = {};
     pays.forEach(p => { byMethod[p.method || "Not recorded"] = (byMethod[p.method || "Not recorded"] || 0) + num(p.amount); });
@@ -587,7 +621,7 @@ function viewPayments() {
         <button class="btn" data-act="ui" data-id="payMonth=${U.addMonths(ym, -1)}" aria-label="Previous month">‹</button>
         <input type="month" id="pay-month" value="${ym}" data-ui="payMonth" aria-label="Month">
         <button class="btn" data-act="ui" data-id="payMonth=${U.addMonths(ym, 1)}" aria-label="Next month">›</button>
-        <input type="search" id="pay-q" placeholder="Search name…" value="${esc(S.ui.payQ)}" data-ui="payQ">
+        <input type="search" id="pay-q" placeholder="Search name or receipt no.…" value="${esc(S.ui.payQ)}" data-ui="payQ">
         <span class="spacer"></span>
         <button class="btn" data-act="export" data-id="payments-month">Export month</button>
         <button class="btn" data-act="export" data-id="payments">Export all</button>
@@ -595,17 +629,68 @@ function viewPayments() {
       <div class="panel">
         <div class="panel-head"><h2>Payments in ${fmtMonth(ym)}: ${money(sum(pays, p => p.amount))}</h2><span class="hint">${Object.entries(byMethod).map(([k, v]) => `${esc(k)} ${money(v)}`).join(" · ")}</span></div>
         ${pays.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>From</th><th>Date</th><th>Type</th><th>For</th><th>Method</th><th class="num">Amount</th><th></th></tr></thead><tbody>
-          ${pays.map(p => { const ms = p.membershipId ? membershipById(p.membershipId) : null; return `<tr${p.memberId ? ` class="clickable" data-act="member" data-id="${esc(p.memberId)}"` : ""}><td><b>${esc(p.memberName || p.payerName || "—")}</b>${p.receipt ? `<span class="sub">${esc(p.receipt)}</span>` : ""}</td><td>${fmtDate(p.date)}</td><td>${esc(p.type || "Membership")}</td>
+          ${pays.map(p => { const ms = p.membershipId ? membershipById(p.membershipId) : null; const ph = photoOf.get(p.id); return `<tr${p.memberId ? ` class="clickable" data-act="member" data-id="${esc(p.memberId)}"` : ""}><td><b>${esc(p.memberName || p.payerName || "—")}</b>${payNo(p) ? `<span class="sub">${esc(payNo(p))}</span>` : ""}</td><td>${fmtDate(p.date)}</td><td>${esc(p.type || "Membership")}</td>
             <td>${ms ? esc(ms.kind === "charge" ? ms.description : ms.plan || "Membership") : esc(p.note && !/^from /.test(p.note) ? p.note : "—")}</td><td>${esc(p.method || "")}</td><td class="num">${money(p.amount)}</td>
-            <td class="actions"><button class="btn small" data-act="receipt" data-id="${esc(p.id)}">Receipt</button><button class="btn small danger" data-act="del-payment" data-id="${esc(p.id)}" aria-label="Delete payment">✕</button></td></tr>`; }).join("")}
+            <td class="actions">${ph ? `<button class="btn small" data-act="rc-open" data-id="${esc(ph.id)}">Photo</button>` : ""}<button class="btn small" data-act="receipt" data-id="${esc(p.id)}">Receipt</button><button class="btn small" data-act="edit-payment" data-id="${esc(p.id)}">Edit</button><button class="btn small danger" data-act="del-payment" data-id="${esc(p.id)}" aria-label="Delete payment">✕</button></td></tr>`; }).join("")}
         </tbody><tfoot><tr><td colspan="5">Total</td><td class="num">${money(sum(pays, p => p.amount))}</td><td></td></tr></tfoot></table></div>` : empty("No payments in this month.")}
       </div>`;
   }
-  return `<div class="toolbar"><span class="spacer"></span><button class="btn" data-act="new-charge">+ Kit / other charge</button><button class="btn primary" data-act="new-payment">+ Record payment</button></div>${head}${tabs}${body}`;
+  return `<div class="toolbar"><span class="spacer"></span><a class="btn" href="#receipts">Receipt photos</a><button class="btn" data-act="new-charge">+ Kit / other charge</button><button class="btn primary" data-act="new-payment">+ Record payment</button></div>${head}${tabs}${body}`;
+}
+
+const payNo = p => [p.bookNo ? `No. ${p.bookNo}` : "", p.receipt].filter(Boolean).join(" · ");
+// Voucher photos by the payment or expense they belong to.
+function receiptsByPayment() {
+  const map = new Map();
+  for (const r of S.receipts) for (const k of [r.paymentId, r.expenseId]) if (k && !map.has(k)) map.set(k, r);
+  return map;
+}
+
+function viewReceipts() {
+  if (!S.loaded.has("receipts")) return empty("Loading receipt photos…");
+  const f = S.ui.rcFilter, t = S.ui.rcType;
+  const ofType = S.receipts.filter(r => !t || (r.kind || "in") === t);
+  const unsent = ofType.filter(r => !r.sentAt);
+  const rows = f === "unsent" ? unsent : f === "sent" ? ofType.filter(r => r.sentAt) : ofType;
+  const sel = S.ui.rcSel.filter(id => S.receipts.some(r => r.id === id));
+  const toSend = sel.length ? sel.length : unsent.length;
+  const mb = sum(S.receipts, r => r.bytes) / 1048576;
+  const link = safeLink(S.settings.accountantLink);
+  const kindBadge = r => (r.kind || "in") === "out" ? badge("b-warn", "Payment voucher") : badge("b-info", "Receipt voucher");
+  return `
+    <div class="toolbar">
+      <div class="seg">${seg("rcFilter", "unsent", `Not sent yet (${unsent.length})`)}${seg("rcFilter", "sent", "Sent")}${seg("rcFilter", "all", `All (${ofType.length})`)}</div>
+      <select data-ui="rcType" id="rc-type" aria-label="Type">${options([["", "Receipt & payment vouchers"], ["in", "Receipt vouchers (money in)"], ["out", "Payment vouchers (money out)"]], t)}</select>
+      <span class="spacer"></span>
+      ${sel.length ? `<button class="btn" data-act="rc-clear">Clear selection (${sel.length})</button>` : ""}
+      ${link ? `<a class="btn" href="${esc(link)}" target="_blank" rel="noopener">Open ${esc(S.settings.accountantName || "accountant group")}</a>` : ""}
+      <button class="btn primary" data-act="rc-send"${toSend ? "" : " disabled"}>Send ${toSend ? `${toSend} ` : ""}to the accountant</button>
+    </div>
+    <div class="dropzone-wrap">
+      <span class="hint">New photos are:</span>
+      <div class="seg">${seg("rcKind", "in", "Receipts (سند قبض)")}${seg("rcKind", "out", "Payments (سند صرف)")}</div>
+      <label class="dropzone" for="rc-file">
+        ${icon("receipts")}<b>Drag ${S.ui.rcKind === "out" ? "payment voucher" : "receipt voucher"} photos here</b>
+        <span>or tap to take a photo or choose some. You can also drop photos anywhere in the admin.</span>
+        <input type="file" id="rc-file" accept="image/*" multiple hidden data-change="rc-files">
+      </label>
+    </div>
+    ${link ? "" : `<div class="callout warn">Add the accountant's WhatsApp group link in <a href="#settings">Settings → Receipts & accountant</a>, so "Send" can open the group.</div>`}
+    <div class="panel">
+      <div class="panel-head"><h2>${f === "unsent" ? "Not sent to the accountant yet" : f === "sent" ? "Sent to the accountant" : "All voucher photos"}</h2><span class="hint">Tap a photo to fill in the number, amount and name from the voucher. Tick photos to send only those.</span></div>
+      ${rows.length ? `<div class="rc-grid">${rows.map(r => `<div class="rc-card${sel.includes(r.id) ? " on" : ""}">
+          <button type="button" class="rc-thumb" data-act="rc-open" data-id="${esc(r.id)}" aria-label="Open voucher ${esc(r.number || "")}"><img src="${esc(r.thumb)}" alt="" loading="lazy"></button>
+          <label class="rc-check" aria-label="Select"><input type="checkbox" data-change="rc-sel" data-id="${esc(r.id)}"${sel.includes(r.id) ? " checked" : ""}></label>
+          ${r.sentAt ? `<span class="rc-sent">${badge("b-ok", "Sent")}</span>` : ""}
+          <div class="rc-meta">${kindBadge(r)}<br><b>${r.number ? `No. ${esc(r.number)}` : "No number yet"}</b>${r.amount ? ` · ${money(r.amount)}` : ""}<span class="sub">${esc(r.name || r.memberName || r.being || r.note || "—")}</span><span class="sub">${fmtDate(r.date)}${r.sentAt ? ` · sent ${fmtDate(r.sentAt)}` : ""}</span></div>
+        </div>`).join("")}</div>` : empty(f === "unsent" ? "Everything has been sent to the accountant." : "No voucher photos yet.")}
+      ${S.receipts.length ? `<div class="panel-body hint">The photos use ${mb < 1 ? "less than 1" : `about ${Math.round(mb)}`} MB of the database's free 1 GB${S.receipts.length >= 400 ? " (counting the latest 400)" : ""}.</div>` : ""}
+    </div>`;
 }
 
 function viewExpenses() {
   const { expMonth: ym, expCat } = S.ui;
+  const photoOf = receiptsByPayment();
   const bills = billRows(ym);
   const list = S.expenses.filter(x => (x.date || x.dueDate || "").startsWith(ym) || (x.period === ym)).filter(x => !expCat || x.category === expCat)
     .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
@@ -649,9 +734,9 @@ function viewExpenses() {
     <div class="panel">
       <div class="panel-head"><h2>Expense log: ${fmtMonth(ym)}</h2></div>
       ${list.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Description</th><th>Date</th><th>Category</th><th>Paid with</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead><tbody>
-        ${list.map(x => `<tr class="clickable" data-act="edit-expense" data-id="${esc(x.id)}"><td><b>${esc(x.description || x.category)}</b>${x.vendor ? `<span class="sub">${esc(x.vendor)}</span>` : ""}</td><td>${fmtDate(x.date || x.dueDate)}</td><td>${esc(x.category)}</td><td>${esc(x.status === "unpaid" ? "" : x.method || "")}</td>
+        ${list.map(x => { const ph = photoOf.get(x.id); return `<tr class="clickable" data-act="edit-expense" data-id="${esc(x.id)}"><td><b>${esc(x.description || x.category)}</b>${x.vendor || x.voucherNo ? `<span class="sub">${esc([x.vendor, x.voucherNo ? `Voucher no. ${x.voucherNo}` : ""].filter(Boolean).join(" · "))}</span>` : ""}</td><td>${fmtDate(x.date || x.dueDate)}</td><td>${esc(x.category)}</td><td>${esc(x.status === "unpaid" ? "" : x.method || "")}</td>
           <td>${x.status === "unpaid" ? badge("b-bad", "Unpaid") : badge("b-ok", "Paid")}</td><td class="num">${money(x.amount)}</td>
-          <td class="actions">${x.status === "unpaid" ? `<button class="btn small primary" data-act="pay-expense" data-id="${esc(x.id)}">Pay</button>` : ""}<button class="btn small danger" data-act="del-expense" data-id="${esc(x.id)}" aria-label="Delete expense">✕</button></td></tr>`).join("")}
+          <td class="actions">${ph ? `<button class="btn small" data-act="rc-open" data-id="${esc(ph.id)}">Photo</button>` : ""}${x.status === "unpaid" ? `<button class="btn small primary" data-act="pay-expense" data-id="${esc(x.id)}">Pay</button>` : ""}<button class="btn small danger" data-act="del-expense" data-id="${esc(x.id)}" aria-label="Delete expense">✕</button></td></tr>`; }).join("")}
       </tbody><tfoot><tr><td colspan="5">Total paid</td><td class="num">${money(sum(paid, x => x.amount))}</td><td></td></tr></tfoot></table></div>` : empty("No expenses in this month.")}
     </div>`;
 }
@@ -887,6 +972,13 @@ function viewSettings() {
         <div><label for="s-win">Show renewals this many days before the end</label><input id="s-win" type="number" min="0" max="60" data-draft="renewWindow" value="${esc(d.renewWindow)}"></div>
         <div class="full"><label for="s-rem">WhatsApp renewal reminder</label><textarea id="s-rem" data-draft="reminderText">${esc(d.reminderText)}</textarea><span class="hint">Placeholders: {name} {date} {amount} {club}</span></div>
         <div class="full"><label for="s-bal">WhatsApp reminder for money owed</label><textarea id="s-bal" data-draft="balanceText">${esc(d.balanceText)}</textarea><span class="hint">Placeholders: {name} {amount} {what} {club}</span></div>
+        <div class="full"><label for="s-can">WhatsApp message to cancelled members</label><textarea id="s-can" data-draft="cancelText">${esc(d.cancelText)}</textarea><span class="hint">Asks if they want to cancel for sure or renew. Placeholders: {name} {date} {amount} {club}</span></div>
+      </div></div>
+
+      <div class="panel"><div class="panel-head"><h2>Receipts & accountant</h2><span class="hint">Where "Send to the accountant" on the Receipt photos page goes.</span></div><div class="panel-body fgrid">
+        <div><label for="s-accname">Name</label><input id="s-accname" data-draft="accountantName" value="${esc(d.accountantName)}" placeholder="Accountant group"></div>
+        <div><label for="s-acclink">WhatsApp group link</label><input id="s-acclink" type="url" data-draft="accountantLink" value="${esc(d.accountantLink)}" placeholder="https://chat.whatsapp.com/…" autocapitalize="none" spellcheck="false"></div>
+        <div class="full hint">On a phone, Send opens the share menu with the photos: choose WhatsApp, then the group. On a computer, the photos download and the group opens in WhatsApp so you can drag them in.</div>
       </div></div>
 
       <div class="panel"><div class="panel-head"><h2>Fee plans</h2><span class="hint">Prices for kids and adults. "Months" sets the end date of a new membership; use 0 for session packs.</span></div>
@@ -906,8 +998,8 @@ function viewSettings() {
       <div class="panel"><div class="panel-head"><h2>Import & backup</h2></div><div class="panel-body grid">
         <div><b>Add members from Excel.</b> <span class="hint">In Excel choose File → Save As → CSV UTF-8, then import. Columns are matched by their names (Name, Phone, Program, Start date, End date, Amount…).</span>
           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="import-members">Import members from CSV</button><button class="btn" data-act="csv-template">Download template</button></div></div>
-        <div><b>Backup.</b> <span class="hint">Download everything as one file and keep it somewhere safe, or restore from a backup / import file.</span>
-          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="backup">Download full backup</button><button class="btn" data-act="restore">Restore / import file</button></div></div>
+        <div><b>Backup.</b> <span class="hint">Download everything as one file and keep it somewhere safe, or restore from a backup / import file. The normal backup has small previews of the receipt photos; the bigger one has the full photos too.</span>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="backup">Download full backup</button><button class="btn" data-act="backup" data-id="photos">Backup with receipt photos</button><button class="btn" data-act="restore">Restore / import file</button></div></div>
       </div></div>
 
       ${MODE === "demo" ? `<div class="panel"><div class="panel-head"><h2>Demo data</h2></div><div class="panel-body" style="display:flex;gap:8px;flex-wrap:wrap">
@@ -922,12 +1014,31 @@ function viewSettings() {
     </div>`;
 }
 
-const VIEWS = { dashboard: viewDashboard, members: viewMembers, payments: viewPayments, expenses: viewExpenses, schedule: viewSchedule, equipment: viewEquipment, leads: viewLeads, attendance: viewAttendance, reports: viewReports, activity: viewActivity, settings: viewSettings };
+const VIEWS = { dashboard: viewDashboard, members: viewMembers, payments: viewPayments, receipts: viewReceipts, expenses: viewExpenses, schedule: viewSchedule, equipment: viewEquipment, leads: viewLeads, attendance: viewAttendance, reports: viewReports, activity: viewActivity, settings: viewSettings };
 
 // ---------- Forms ----------
 function nextReceipt() {
   const n = Math.max(0, ...S.payments.map(p => Number(String(p.receipt || "").replace(/\D/g, "")) || 0));
   return `R-${String(n + 1).padStart(4, "0")}`;
+}
+
+// The club's paper vouchers: a Receipt Voucher (سند قبض) for money in, a Payment Voucher (سند صرف) for money out.
+// Each form that takes or spends money asks for the voucher number and an optional photo of it (saved under Receipt photos).
+const VOUCHER = { in: "Receipt voucher", out: "Payment voucher" };
+const receiptFields = (prefix, no = "", kind = "in", name = "bookNo") => `
+  <div><label for="${prefix}-book">${VOUCHER[kind]} no.</label><input id="${prefix}-book" name="${name}" maxlength="30" value="${esc(no)}" placeholder="The red number on the voucher" autocomplete="off"></div>
+  <div><label for="${prefix}-photo">${VOUCHER[kind]} photo</label><input id="${prefix}-photo" type="file" accept="image/*" multiple data-photo></div>`;
+function attachPhotos(form, p, paymentId) {
+  const files = form.querySelector("[data-photo]")?.files;
+  if (!files?.length) return;
+  addReceiptPhotos([...files], { kind: "in", paymentId, memberId: p.memberId, memberName: p.memberName, name: p.memberName || p.payerName, amount: p.amount, date: p.date, number: p.bookNo || "", method: p.method, being: p.type || "" }, { stay: true })
+    .catch(err => U.toast(err.message || String(err), "error"));
+}
+function attachExpensePhotos(form, x, expenseId) {
+  const files = form.querySelector("[data-photo]")?.files;
+  if (!files?.length) return;
+  addReceiptPhotos([...files], { kind: "out", expenseId, name: x.vendor, amount: x.amount, date: x.date, number: x.voucherNo || "", method: x.method, being: x.description }, { stay: true })
+    .catch(err => U.toast(err.message || String(err), "error"));
 }
 
 function memberOptions(selected, { allowNone = true } = {}) {
@@ -952,6 +1063,7 @@ function openPayment(pre = {}) {
       <div><label for="p-amount">Amount (${esc(S.settings.currency)}) *</label><input id="p-amount" name="amount" type="number" min="0" step="0.01" required inputmode="decimal"></div>
       <div><label for="p-method">Method</label><select id="p-method" name="method">${options(METHODS, "Cash")}</select></div>
       <div><label for="p-date">Date received</label><input id="p-date" name="date" type="date" value="${U.todayISO()}" required></div>
+      ${receiptFields("p")}
       <div class="full"><label for="p-note">Note</label><input id="p-note" name="note" maxlength="200" placeholder="Optional"></div>
       <div class="full" id="p-hint"></div>
     </div>`,
@@ -980,17 +1092,18 @@ function openPayment(pre = {}) {
       fillFor(); sync();
       if (pre.amount) f.amount.value = pre.amount;
     },
-    async onSubmit(d) {
+    async onSubmit(d, form) {
       const m = memberById(d.memberId);
       if (!(num(d.amount) > 0)) { U.toast("Enter an amount above zero.", "error"); return false; }
       const ms = m ? membershipById(d.membershipId) : null;
       const p = {
         memberId: m ? m.id : "", memberName: m ? m.name : "", payerName: m ? "" : d.payerName,
         membershipId: ms ? ms.id : "", type: ms ? (ms.kind === "charge" ? ms.chargeType || "Uniform & gear sale" : "Membership") : d.type,
-        amount: num(d.amount), method: d.method, date: d.date, note: d.note, receipt: nextReceipt(), createdAt: U.nowISO(), createdBy: who()
+        amount: num(d.amount), method: d.method, date: d.date, bookNo: d.bookNo, note: d.note, receipt: nextReceipt(), createdAt: U.nowISO(), createdBy: who()
       };
-      await store.add("payments", p);
-      await log(`Recorded payment ${p.receipt}: ${money(p.amount)} from ${p.memberName || p.payerName} for ${ms ? whatOf(ms) : p.type} (${p.method})`);
+      const pid = await store.add("payments", p);
+      attachPhotos(form, p, pid);
+      await log(`Recorded payment ${p.receipt}${p.bookNo ? ` (receipt no. ${p.bookNo})` : ""}: ${money(p.amount)} from ${p.memberName || p.payerName} for ${ms ? whatOf(ms) : p.type} (${p.method})`);
       U.toast(`Saved ${p.receipt}: ${money(p.amount)}`);
     }
   });
@@ -1019,6 +1132,7 @@ function openMembership(pre = {}) {
       <div class="full" id="ms-kit-items-wrap"><label for="ms-kit-items">Kit items</label><input id="ms-kit-items" name="kitItems" maxlength="120" placeholder="e.g. gloves, shin guards, T-shirt"></div>
       <div><label for="ms-paid">Paid now</label><input id="ms-paid" name="paidNow" type="number" min="0" step="0.01" inputmode="decimal"></div>
       <div><label for="ms-method">Method</label><select id="ms-method" name="method">${options(METHODS, "Cash")}</select></div>
+      ${receiptFields("ms")}
       <div class="full"><label style="display:flex;gap:8px;align-items:center;color:var(--text);margin:0"><input type="checkbox" name="handout"> Kit still to be handed out</label></div>
       <div class="full"><label for="ms-note">Note</label><input id="ms-note" name="note" maxlength="200" placeholder="Optional: offer, sessions…"></div>
       <div class="full" id="ms-hint"></div>
@@ -1053,7 +1167,7 @@ function openMembership(pre = {}) {
       f.paidNow.addEventListener("input", () => { f.paidNow.dataset.touched = "1"; sync("paid"); });
       sync("init");
     },
-    async onSubmit(d) {
+    async onSubmit(d, form) {
       const m = memberById(d.memberId);
       if (!m) { U.toast("Choose the member.", "error"); return false; }
       if (d.endDate < d.startDate) { U.toast("The end date is before the start date.", "error"); return false; }
@@ -1062,7 +1176,8 @@ function openMembership(pre = {}) {
       const msId = await store.add("memberships", ms);
       const paid = num(d.paidNow);
       if (paid > 0) {
-        await store.add("payments", { memberId: m.id, memberName: m.name, payerName: "", membershipId: msId, type: "Membership", amount: paid, method: d.method, date: U.todayISO(), note: "", receipt: nextReceipt(), createdAt: U.nowISO(), createdBy: who() });
+        const p = { memberId: m.id, memberName: m.name, payerName: "", membershipId: msId, type: "Membership", amount: paid, method: d.method, date: U.todayISO(), bookNo: d.bookNo, note: "", receipt: nextReceipt(), createdAt: U.nowISO(), createdBy: who() };
+        attachPhotos(form, p, await store.add("payments", p));
       }
       if (d.handout && d.kitItems) await store.add("handouts", { name: m.name, memberId: m.id, item: d.kitItems, done: false, createdAt: U.nowISO(), createdBy: who() });
       const patch = {};
@@ -1093,6 +1208,7 @@ function openCharge(pre = {}) {
       <div><label for="c-paid">Paid now</label><input id="c-paid" name="paidNow" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(eq?.salePrice || pre.amount || "")}"></div>
       <div><label for="c-method">Method</label><select id="c-method" name="method">${options(METHODS, "Cash")}</select></div>
       <div><label style="display:flex;gap:8px;align-items:center;color:var(--text);margin-top:24px"><input type="checkbox" name="handout"> Still to hand out</label></div>
+      ${receiptFields("c")}
     </div>`,
     onOpen(el) {
       const f = el.querySelector("form");
@@ -1109,14 +1225,17 @@ function openCharge(pre = {}) {
       });
       f.amount.addEventListener("input", () => { f.paidNow.value = f.amount.value; });
     },
-    async onSubmit(d) {
+    async onSubmit(d, form) {
       const m = memberById(d.memberId);
       if (!m) { U.toast("Choose the member.", "error"); return false; }
       const amount = num(d.amount);
       if (!(amount > 0)) { U.toast("Enter the price.", "error"); return false; }
       const id = await store.add("memberships", { memberId: m.id, memberName: m.name, kind: "charge", chargeType: d.chargeType, description: d.description, amount, startDate: U.todayISO(), paidBeforeImport: 0, createdAt: U.nowISO(), createdBy: who() });
       const paid = num(d.paidNow);
-      if (paid > 0) await store.add("payments", { memberId: m.id, memberName: m.name, payerName: "", membershipId: id, type: d.chargeType, amount: paid, method: d.method, date: U.todayISO(), note: d.description, receipt: nextReceipt(), createdAt: U.nowISO(), createdBy: who() });
+      if (paid > 0) {
+        const p = { memberId: m.id, memberName: m.name, payerName: "", membershipId: id, type: d.chargeType, amount: paid, method: d.method, date: U.todayISO(), bookNo: d.bookNo, note: d.description, receipt: nextReceipt(), createdAt: U.nowISO(), createdBy: who() };
+        attachPhotos(form, p, await store.add("payments", p));
+      }
       if (d.handout) await store.add("handouts", { name: m.name, memberId: m.id, item: d.description, done: false, createdAt: U.nowISO(), createdBy: who() });
       if (eq) {
         await store.update("equipment", eq.id, { qty: Math.max(0, num(eq.qty) - 1) });
@@ -1129,10 +1248,21 @@ function openCharge(pre = {}) {
 
 function memberForm(m = {}) {
   const progs = new Set(m.programs || []);
+  const status = m.status === "cancelled" ? `
+    <div class="full"><h4 class="section-title" style="margin-top:4px">Cancellation</h4></div>
+    <div><label for="mf-cdate">Cancelled on</label><input id="mf-cdate" name="cancelDate" type="date" value="${esc(m.cancelDate)}"></div>
+    <div><label for="mf-creason">Reason</label><select id="mf-creason" name="cancelReason">${options([...new Set([...CANCEL_REASONS, m.cancelReason || ""])].filter(Boolean), m.cancelReason, { blank: "—" })}</select></div>
+    <div class="full"><label for="mf-cnote">Cancellation note</label><input id="mf-cnote" name="cancelNote" maxlength="300" value="${esc(m.cancelNote)}"></div>`
+    : m.status === "paused" ? `
+    <div class="full"><h4 class="section-title" style="margin-top:4px">Pause</h4></div>
+    <div><label for="mf-pfrom">Paused from</label><input id="mf-pfrom" name="pausedFrom" type="date" value="${esc(m.pausedFrom)}"></div>
+    <div><label for="mf-puntil">Until</label><input id="mf-puntil" name="pauseUntil" type="date" value="${esc(m.pauseUntil)}"></div>
+    <div class="full"><label for="mf-preason">Reason</label><input id="mf-preason" name="pauseReason" maxlength="200" value="${esc(m.pauseReason)}"></div>` : "";
   return `<div class="fgrid">
     <div><label for="mf-name">Full name *</label><input id="mf-name" name="name" required maxlength="100" value="${esc(m.name)}"></div>
     <div><label for="mf-phone">Phone / WhatsApp</label><input id="mf-phone" name="phone" type="tel" maxlength="30" value="${esc(m.phone)}" placeholder="05X XXX XXXX"></div>
     <div><label for="mf-age">Kid or adult</label><select id="mf-age" name="ageGroup">${options(["Adults", "Kids"], m.ageGroup || "Adults")}</select></div>
+    <div><label for="mf-join">Joining date</label><input id="mf-join" name="joinDate" type="date" value="${esc(m.id ? m.joinDate : m.joinDate || U.todayISO())}"></div>
     <div><label for="mf-dob">Date of birth</label><input id="mf-dob" name="dob" type="date" value="${esc(m.dob)}"></div>
     <div><label for="mf-gname">Parent / guardian</label><input id="mf-gname" name="guardianName" maxlength="100" value="${esc(m.guardianName)}"></div>
     <div><label for="mf-gphone">Guardian phone</label><input id="mf-gphone" name="guardianPhone" type="tel" maxlength="30" value="${esc(m.guardianPhone)}"></div>
@@ -1141,11 +1271,26 @@ function memberForm(m = {}) {
     <div><label for="mf-belt">Belt / rank</label><input id="mf-belt" name="belt" maxlength="60" value="${esc(m.belt)}" placeholder="e.g. Yellow belt"></div>
     <div class="full"><label for="mf-em">Emergency contact</label><input id="mf-em" name="emergency" maxlength="120" value="${esc(m.emergency)}" placeholder="Name and phone"></div>
     <div class="full"><label for="mf-notes">Notes (medical, injuries, anything useful)</label><textarea id="mf-notes" name="notes" maxlength="2000">${esc(m.notes)}</textarea></div>
+    ${status}
   </div>`;
 }
+// Fields the form shows; the cancellation / pause ones only when the member is cancelled / paused.
 function memberData(d) {
-  if (!d.phone && !d.guardianPhone) throw new Error("Add a phone number (the member's or the guardian's).");
-  return { name: d.name, phone: d.phone, email: d.email, dob: d.dob, ageGroup: d.ageGroup, guardianName: d.guardianName, guardianPhone: d.guardianPhone, programs: d.programs || [], belt: d.belt, emergency: d.emergency, notes: d.notes };
+  const out = { name: d.name, phone: d.phone, email: d.email, dob: d.dob, joinDate: d.joinDate, ageGroup: d.ageGroup, guardianName: d.guardianName, guardianPhone: d.guardianPhone, programs: d.programs || [], belt: d.belt, emergency: d.emergency, notes: d.notes };
+  for (const k of ["cancelDate", "cancelReason", "cancelNote", "pausedFrom", "pauseUntil", "pauseReason"]) if (k in d) out[k] = d[k];
+  return out;
+}
+const FIELD_NAMES = { name: "name", phone: "phone", email: "email", dob: "date of birth", joinDate: "joining date", ageGroup: "kid/adult", guardianName: "guardian", guardianPhone: "guardian phone", programs: "programs", belt: "belt", emergency: "emergency contact", notes: "notes", cancelDate: "cancel date", cancelReason: "cancel reason", cancelNote: "cancel note", pausedFrom: "pause start", pauseUntil: "pause end", pauseReason: "pause reason" };
+
+// Names are copied onto memberships, payments, check-ins, kit and receipts (so lists stay fast); a rename updates them all.
+function renameOps(memberId, name) {
+  return [
+    ...S.memberships.filter(x => x.memberId === memberId && x.memberName !== name).map(x => ["memberships", x.id, { memberName: name }]),
+    ...S.payments.filter(x => x.memberId === memberId && x.memberName !== name).map(x => ["payments", x.id, { memberName: name }]),
+    ...S.attendance.filter(x => x.memberId === memberId && x.memberName !== name).map(x => ["attendance", x.id, { memberName: name }]),
+    ...S.handouts.filter(x => x.memberId === memberId && x.name !== name).map(x => ["handouts", x.id, { name }]),
+    ...S.receipts.filter(x => x.memberId === memberId && x.memberName !== name).map(x => ["receipts", x.id, { memberName: name }])
+  ];
 }
 
 function openNewMember(pre = {}) {
@@ -1155,6 +1300,7 @@ function openNewMember(pre = {}) {
     footer: `<footer><label class="left" style="display:flex;gap:6px;align-items:center;margin:0;color:var(--text)"><input type="checkbox" name="startNow" checked> Start a membership next</label><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Add member</button></footer>`,
     async onSubmit(d) {
       const data = { ...memberData(d), status: "active", createdAt: U.nowISO(), createdBy: who() };
+      if (!data.phone && !data.guardianPhone) U.toast("Saved without a phone number. Add one later so you can send WhatsApp reminders.");
       const id = await store.add("members", data);
       await log(`Added member ${data.name} (${(data.programs || []).join(", ") || "no program yet"})`);
       U.toast(`${data.name} added`);
@@ -1177,8 +1323,9 @@ function openEditMember(id) {
       const data = memberData(d);
       const changes = Object.keys(data).filter(k => JSON.stringify(data[k] ?? "") !== JSON.stringify(m[k] ?? ""));
       await store.update("members", id, data);
-      if (changes.length) await log(`Edited member ${data.name}: ${changes.join(", ")}`);
-      U.toast("Saved");
+      const moved = data.name !== m.name ? await store.updateMany(renameOps(id, data.name)) : 0;
+      if (changes.length) await log(`Edited member ${data.name}${data.name !== m.name ? ` (was ${m.name})` : ""}: ${changes.map(k => FIELD_NAMES[k] || k).join(", ")}${moved ? ` · name updated on ${moved} linked records` : ""}`);
+      U.toast(changes.length ? "Saved" : "Nothing changed");
     }
   });
 }
@@ -1200,11 +1347,17 @@ function memberDetail(id) {
       const wa = U.waLink(m.phone);
       const gwa = U.waLink(m.guardianPhone);
       const hand = S.handouts.filter(h => h.memberId === id && !h.done);
+      const photos = receiptsByPayment();
       return `
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px"><h3 style="font-size:20px">${esc(m.name)}</h3>${stateBadge(st)}</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px"><h3 style="font-size:20px">${esc(m.name)}</h3>${stateBadge(st)}<button type="button" class="btn small" style="margin-left:auto" data-act="edit-member" data-id="${esc(id)}">Edit details</button></div>
         ${o.total ? `<div class="callout bad">Owes <b>${money(o.total)}</b>: ${o.list.map(x => `${esc(x.ms.kind === "charge" ? x.ms.description : x.ms.plan || "membership")} ${money(x.bal)}`).join(", ")}.</div>` : ""}
         ${st.state === "expired" ? `<div class="callout warn">Membership ended ${fmtDate(st.ms.endDate)} (${st.days} days ago).</div>` : ""}
-        ${m.status === "cancelled" ? `<div class="callout info">Cancelled on ${fmtDate(m.cancelDate)}${m.cancelReason ? ` · ${esc(m.cancelReason)}` : ""}${m.cancelNote ? ` · ${esc(m.cancelNote)}` : ""}</div>` : ""}
+        ${m.status === "cancelled" ? `<div class="callout info">Cancelled on ${fmtDate(m.cancelDate)}${m.cancelReason ? ` · ${esc(m.cancelReason)}` : ""}${m.cancelNote ? ` · ${esc(m.cancelNote)}` : ""}
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${askState(m)}${m.cancelAskedAt ? `<span class="hint">asked ${U.fmtWhen(m.cancelAskedAt)}${m.cancelAskedBy ? ` by ${esc(m.cancelAskedBy)}` : ""}</span>` : ""}</div>
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${remindLink(m, "cancel", m.cancelAskedAt ? "Ask again on WhatsApp" : "Ask on WhatsApp: cancel or renew?") || `<span class="hint">No phone number, so no WhatsApp message. Tap Edit to add one.</span>`}
+            <button type="button" class="btn small" data-act="cancel-answer" data-id="${esc(id)}" data-answer="renew">Wants to renew</button>
+            <button type="button" class="btn small" data-act="cancel-answer" data-id="${esc(id)}" data-answer="cancel">Confirmed cancel</button>
+            <button type="button" class="btn small" data-act="cancel-answer" data-id="${esc(id)}" data-answer="none">No reply</button></div></div>` : ""}
         ${m.status === "paused" ? `<div class="callout warn">Paused since ${fmtDate(m.pausedFrom)}${m.pauseUntil ? ` until ${fmtDate(m.pauseUntil)}` : ""}${m.pauseReason ? ` · ${esc(m.pauseReason)}` : ""}.</div>` : ""}
         ${hand.length ? `<div class="callout info">Kit to hand out: ${hand.map(h => `${esc(h.item)} <button type="button" class="linkish" data-act="handout-done" data-id="${esc(h.id)}">mark handed out</button>`).join(" · ")}</div>` : ""}
         <div class="dl">
@@ -1212,7 +1365,8 @@ function memberDetail(id) {
           ${m.guardianName || m.guardianPhone ? `<div><b>Guardian</b>${esc(m.guardianName || "")} ${esc(m.guardianPhone || "")}${gwa ? ` · <a href="${esc(gwa)}" target="_blank" rel="noopener">WhatsApp</a>` : ""}</div>` : ""}
           <div><b>Programs</b>${esc((m.programs || []).join(", ") || "—")}</div>
           <div><b>Membership</b>${st.ms ? `${esc(st.ms.plan || "")}<br><span class="hint">${fmtDate(st.ms.startDate)} – ${fmtDate(st.ms.endDate)}</span>` : "—"}</div>
-          <div><b>Member since</b>${fmtDate(m.joinDate)}</div>
+          <div><b>Joined</b>${fmtDate(m.joinDate)}</div>
+          ${m.dob ? `<div><b>Date of birth</b>${fmtDate(m.dob)}</div>` : ""}
           ${m.ageGroup ? `<div><b>Group</b>${esc(m.ageGroup)}${age !== "" ? ` · ${age} yrs` : ""}</div>` : ""}
           ${m.email ? `<div><b>Email</b><a href="mailto:${esc(m.email)}">${esc(m.email)}</a></div>` : ""}
           ${m.belt ? `<div><b>Belt / rank</b>${esc(m.belt)}</div>` : ""}
@@ -1227,7 +1381,6 @@ function memberDetail(id) {
           ${["expired", "ending"].includes(st.state) ? remindLink(m, "renewal", "Renewal reminder") : ""}
           <button type="button" class="btn" data-act="new-charge" data-id="${esc(id)}">+ Kit / charge</button>
           ${m.status !== "cancelled" ? `<button type="button" class="btn" data-act="checkin-one" data-id="${esc(id)}">Check in</button>` : ""}
-          <button type="button" class="btn" data-act="edit-member" data-id="${esc(id)}">Edit</button>
           ${m.status === "active" || !m.status ? `<button type="button" class="btn" data-act="pause-member" data-id="${esc(id)}">Pause</button>` : ""}
           ${m.status === "paused" ? `<button type="button" class="btn" data-act="resume-member" data-id="${esc(id)}">Resume</button>` : ""}
           ${m.status !== "cancelled" ? `<button type="button" class="btn danger" data-act="cancel-member" data-id="${esc(id)}">Cancel membership</button>` : ""}
@@ -1241,7 +1394,7 @@ function memberDetail(id) {
           </tbody></table></div>` : `<p class="hint">No memberships yet.</p>`}
         <h4 class="section-title">Payments</h4>
         ${pays.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Amount</th><th>Date</th><th>Type</th><th>Method</th><th></th></tr></thead><tbody>
-          ${pays.map(p => `<tr><td><b>${money(p.amount)}</b>${p.receipt ? `<span class="sub">${esc(p.receipt)}</span>` : ""}</td><td>${fmtDate(p.date)}</td><td>${esc(p.type || "Membership")}</td><td>${esc(p.method || "")}</td><td class="actions"><button type="button" class="btn small" data-act="receipt" data-id="${esc(p.id)}">Receipt</button></td></tr>`).join("")}
+          ${pays.map(p => { const ph = photos.get(p.id); return `<tr><td><b>${money(p.amount)}</b>${payNo(p) ? `<span class="sub">${esc(payNo(p))}</span>` : ""}</td><td>${fmtDate(p.date)}</td><td>${esc(p.type || "Membership")}</td><td>${esc(p.method || "")}</td><td class="actions">${ph ? `<button type="button" class="btn small" data-act="rc-open" data-id="${esc(ph.id)}">Photo</button>` : ""}<button type="button" class="btn small" data-act="receipt" data-id="${esc(p.id)}">Receipt</button><button type="button" class="btn small" data-act="edit-payment" data-id="${esc(p.id)}">Edit</button></td></tr>`; }).join("")}
           </tbody><tfoot><tr><td colspan="4">Total paid: ${money(sum(pays, p => p.amount))}</td><td></td></tr></tfoot></table></div>` : `<p class="hint">No payments linked to this member.</p>`}
         <footer><button type="button" class="btn left" data-act="merge-member" data-id="${esc(id)}">Merge with another member…</button><button type="button" class="btn danger" data-act="del-member" data-id="${esc(id)}">Delete</button><button type="button" class="btn" data-close>Close</button></footer>`;
     }
@@ -1252,27 +1405,90 @@ function openEditMembership(id) {
   const ms = membershipById(id);
   if (!ms) return;
   const charge = ms.kind === "charge";
+  const planNames = [...new Set([...(S.settings.plans || []).map(p => p.name), ...S.memberships.filter(x => x.kind !== "charge").map(x => x.plan)].filter(Boolean))].sort();
+  const linked = S.payments.filter(p => p.membershipId === id);
   modal({
     title: charge ? "Edit charge" : "Edit membership",
     body: `<div class="fgrid">
-      ${charge ? `<div class="full"><label for="em-desc">What for</label><input id="em-desc" name="description" value="${esc(ms.description)}" maxlength="120"></div>
-        <div><label for="em-amount">Price</label><input id="em-amount" name="amount" type="number" min="0" step="0.01" value="${esc(ms.amount)}"></div>`
-      : `<div><label for="em-plan">Plan</label><input id="em-plan" name="plan" value="${esc(ms.plan)}" maxlength="80"></div>
-        <div><label for="em-course">Program</label><select id="em-course" name="course">${options(PROGRAMS, ms.course)}</select></div>
+      <div class="full"><label for="em-member">Member</label><select id="em-member" name="memberId" required>${memberOptions(ms.memberId, { allowNone: false })}</select>${linked.length ? `<span class="hint">If you change the member, ${linked.length === 1 ? "its payment moves" : `its ${linked.length} payments move`} too.</span>` : ""}</div>
+      ${charge ? `<div><label for="em-type">Type</label><select id="em-type" name="chargeType">${options([...new Set([...CHARGE_TYPES, ms.chargeType || ""])].filter(Boolean), ms.chargeType || "Uniform & gear sale")}</select></div>
+        <div><label for="em-date">Date</label><input id="em-date" name="startDate" type="date" value="${esc(ms.startDate)}"></div>
+        <div class="full"><label for="em-desc">What for</label><input id="em-desc" name="description" value="${esc(ms.description)}" maxlength="120"></div>
+        <div><label for="em-amount">Price</label><input id="em-amount" name="amount" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(ms.amount)}"></div>`
+      : `<div><label for="em-plan">Plan</label><input id="em-plan" name="plan" value="${esc(ms.plan)}" maxlength="80" list="em-plans"><datalist id="em-plans">${planNames.map(n => `<option value="${esc(n)}">`).join("")}</datalist></div>
+        <div><label for="em-course">Program</label><select id="em-course" name="course">${options([...new Set([...PROGRAMS, ms.course || ""])].filter(Boolean), ms.course)}</select></div>
         <div><label for="em-start">Starts</label><input id="em-start" name="startDate" type="date" value="${esc(ms.startDate)}"></div>
         <div><label for="em-end">Ends</label><input id="em-end" name="endDate" type="date" value="${esc(ms.endDate)}"></div>
-        <div><label for="em-pkg">Package price</label><input id="em-pkg" name="packageAmount" type="number" min="0" step="0.01" value="${esc(ms.packageAmount)}"></div>
-        <div><label for="em-kit">Kit price</label><input id="em-kit" name="kitAmount" type="number" min="0" step="0.01" value="${esc(ms.kitAmount)}"></div>`}
-      <div><label for="em-before">Paid before this system</label><input id="em-before" name="paidBeforeImport" type="number" min="0" step="0.01" value="${esc(ms.paidBeforeImport || 0)}"><span class="hint">From the Excel sheets. New payments are added on top.</span></div>
+        <div><label for="em-pkg">Package price</label><input id="em-pkg" name="packageAmount" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(ms.packageAmount)}"></div>
+        <div><label for="em-kit">Kit / uniform price</label><input id="em-kit" name="kitAmount" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(ms.kitAmount)}"></div>
+        <div class="full"><label for="em-kititems">Kit items</label><input id="em-kititems" name="kitItems" maxlength="120" value="${esc(ms.kitItems)}" placeholder="e.g. gloves, shin guards, T-shirt"></div>`}
+      <div><label for="em-before">Paid before this system</label><input id="em-before" name="paidBeforeImport" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(ms.paidBeforeImport || 0)}"><span class="hint">From the Excel sheets. Payments recorded here are added on top${linked.length ? ` (${money(sum(linked, p => p.amount))} so far)` : ""}.</span></div>
       <div class="full"><label for="em-note">Note</label><input id="em-note" name="note" value="${esc(ms.note)}" maxlength="200"></div>
     </div>`,
     footer: `<footer><button type="button" class="btn danger left" data-act="del-ms" data-id="${esc(id)}">Delete</button><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Save</button></footer>`,
     async onSubmit(d) {
-      const patch = charge ? { description: d.description, amount: num(d.amount) } : { plan: d.plan, course: d.course, startDate: d.startDate, endDate: d.endDate, packageAmount: num(d.packageAmount), kitAmount: num(d.kitAmount) };
-      Object.assign(patch, { paidBeforeImport: num(d.paidBeforeImport), note: d.note });
+      const m = memberById(d.memberId);
+      if (!m) { U.toast("Choose the member.", "error"); return false; }
+      if (!charge && d.startDate && d.endDate && d.endDate < d.startDate) { U.toast("The end date is before the start date.", "error"); return false; }
+      const patch = charge
+        ? { chargeType: d.chargeType, startDate: d.startDate, description: d.description, amount: num(d.amount) }
+        : { plan: d.plan, course: d.course, startDate: d.startDate, endDate: d.endDate, packageAmount: num(d.packageAmount), kitAmount: num(d.kitAmount), kitItems: d.kitItems };
+      Object.assign(patch, { memberId: m.id, memberName: m.name, paidBeforeImport: num(d.paidBeforeImport), note: d.note });
       await store.update("memberships", id, patch);
-      await log(`Edited ${charge ? "charge" : "membership"} of ${ms.memberName}: ${charge ? d.description : `${d.plan}, ${fmtDate(d.startDate)} → ${fmtDate(d.endDate)}`}`);
+      const moved = m.id !== ms.memberId ? await store.updateMany(linked.map(p => ["payments", p.id, { memberId: m.id, memberName: m.name }])) : 0;
+      await log(`Edited ${charge ? "charge" : "membership"} of ${m.name}${m.id !== ms.memberId ? ` (moved from ${ms.memberName}${moved ? ` with ${moved} payments` : ""})` : ""}: ${charge ? `${d.description} ${money(d.amount)}` : `${d.plan}, ${fmtDate(d.startDate)} → ${fmtDate(d.endDate)}, ${money(num(d.packageAmount) + num(d.kitAmount))}`}`);
       U.toast("Saved");
+    }
+  });
+}
+
+function openEditPayment(id) {
+  const p = S.payments.find(x => x.id === id);
+  if (!p) return;
+  modal({
+    title: `Edit payment${p.receipt ? " " + p.receipt : ""}`,
+    body: `<div class="fgrid">
+      <div class="full"><label for="ep-member">Member</label><select id="ep-member" name="memberId">${memberOptions(p.memberId)}</select></div>
+      <div class="full" id="ep-payer-wrap"><label for="ep-payer">Paid by (name) *</label><input id="ep-payer" name="payerName" maxlength="100" value="${esc(p.payerName)}"></div>
+      <div class="full" id="ep-for-wrap"><label for="ep-for">For</label><select id="ep-for" name="membershipId"></select></div>
+      <div><label for="ep-type">Type</label><select id="ep-type" name="type">${options([...new Set([...PAY_TYPES, p.type || ""])].filter(Boolean), p.type || "Membership")}</select></div>
+      <div><label for="ep-amount">Amount (${esc(S.settings.currency)}) *</label><input id="ep-amount" name="amount" type="number" min="0" step="0.01" required inputmode="decimal" value="${esc(p.amount)}"></div>
+      <div><label for="ep-method">Method</label><select id="ep-method" name="method">${options([...new Set([...METHODS, p.method || ""])].filter(Boolean), p.method || "Cash")}</select></div>
+      <div><label for="ep-date">Date received</label><input id="ep-date" name="date" type="date" value="${esc(p.date)}" required></div>
+      <div><label for="ep-book">Receipt no.</label><input id="ep-book" name="bookNo" maxlength="30" value="${esc(p.bookNo)}" placeholder="From the receipt book" autocomplete="off"></div>
+      <div><label for="ep-photo">Add receipt photo</label><input id="ep-photo" type="file" accept="image/*" multiple data-photo></div>
+      <div class="full"><label for="ep-note">Note</label><input id="ep-note" name="note" maxlength="200" value="${esc(p.note)}"></div>
+      <div class="full hint">Recorded ${U.fmtWhen(p.createdAt)}${p.createdBy ? ` by ${esc(p.createdBy)}` : ""}.</div>
+    </div>`,
+    footer: `<footer><button type="button" class="btn danger left" data-act="del-payment" data-id="${esc(id)}">Delete</button><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Save</button></footer>`,
+    onOpen(el) {
+      const f = el.querySelector("form");
+      const fillFor = keep => {
+        const m = memberById(f.memberId.value);
+        el.querySelector("#ep-payer-wrap").hidden = !!m;
+        f.payerName.required = !m;
+        el.querySelector("#ep-for-wrap").hidden = !m;
+        const list = m ? membershipsOf(m.id) : [];
+        const pick = keep ? p.membershipId : "";
+        f.membershipId.innerHTML = list.map(ms => `<option value="${esc(ms.id)}"${ms.id === pick ? " selected" : ""}>${esc(whatOf(ms))}${balanceOf(ms) ? `: owes ${esc(money(balanceOf(ms)))}` : ""}</option>`).join("") + `<option value=""${list.some(ms => ms.id === pick) ? "" : " selected"}>Something else (not linked)</option>`;
+      };
+      f.memberId.addEventListener("change", () => fillFor(false));
+      fillFor(true);
+    },
+    async onSubmit(d, form) {
+      const m = memberById(d.memberId);
+      if (!(num(d.amount) > 0)) { U.toast("Enter an amount above zero.", "error"); return false; }
+      const ms = m ? membershipById(d.membershipId) : null;
+      const patch = {
+        memberId: m ? m.id : "", memberName: m ? m.name : "", payerName: m ? "" : d.payerName, membershipId: ms ? ms.id : "",
+        type: d.type, amount: num(d.amount), method: d.method, date: d.date, bookNo: d.bookNo, note: d.note
+      };
+      const changed = Object.keys(patch).filter(k => String(patch[k] ?? "") !== String(p[k] ?? ""));
+      if (changed.length) await store.update("payments", id, patch);
+      attachPhotos(form, { ...p, ...patch }, id);
+      const was = `${money(p.amount)} from ${p.memberName || p.payerName} on ${fmtDate(p.date)}`;
+      if (changed.length) await log(`Edited payment ${p.receipt || ""} (${was}): now ${money(patch.amount)} from ${patch.memberName || patch.payerName} on ${fmtDate(patch.date)}, ${patch.method}${patch.bookNo ? `, receipt no. ${patch.bookNo}` : ""}`);
+      U.toast(changed.length ? "Payment saved" : "Nothing changed");
     }
   });
 }
@@ -1358,6 +1574,7 @@ function openExpense(pre = {}) {
       <div class="e-unpaid"><label for="e-due">Due date</label><input id="e-due" name="dueDate" type="date" value="${esc(v.dueDate || "")}"></div>
       <div><label for="e-vendor">Paid to</label><input id="e-vendor" name="vendor" maxlength="120" value="${esc(v.vendor || "")}" placeholder="Staff name, shop, FEWA…"></div>
       <div><label for="e-ref">Invoice / reference no.</label><input id="e-ref" name="ref" maxlength="80" value="${esc(v.ref || "")}"></div>
+      ${receiptFields("e", v.voucherNo || "", "out", "voucherNo")}
       <div class="full"><label for="e-notes">Notes</label><input id="e-notes" name="notes" maxlength="300" value="${esc(v.notes || "")}"></div>
       ${x ? `<div class="full hint">Added ${U.fmtWhen(x.createdAt)} by ${esc(x.createdBy || "")}</div>` : ""}</div>`,
     onOpen(el) {
@@ -1370,20 +1587,21 @@ function openExpense(pre = {}) {
       f.status.addEventListener("change", sync);
       sync();
     },
-    async onSubmit(d) {
+    async onSubmit(d, form) {
       const unpaid = d.status === "unpaid";
       const data = {
-        category: d.category, amount: num(d.amount), description: d.description, vendor: d.vendor, ref: d.ref,
+        category: d.category, amount: num(d.amount), description: d.description, vendor: d.vendor, ref: d.ref, voucherNo: d.voucherNo,
         status: d.status, method: unpaid ? "" : d.method, date: unpaid ? (d.dueDate || U.todayISO()) : d.date || U.todayISO(),
         dueDate: unpaid ? d.dueDate : (x?.dueDate || ""), notes: d.notes
       };
       if (x) {
         await store.update("expenses", x.id, data);
-        await log(`Edited expense: ${data.description} ${money(data.amount)} (${unpaid ? "unpaid" : "paid"})`);
+        attachExpensePhotos(form, data, x.id);
+        await log(`Edited expense: ${data.description} ${money(data.amount)} (${unpaid ? "unpaid" : "paid"})${data.voucherNo ? `, payment voucher no. ${data.voucherNo}` : ""}`);
       } else {
         Object.assign(data, { billId: pre.billId || "", period: pre.period || "", createdAt: U.nowISO(), createdBy: who() });
-        await store.add("expenses", data);
-        await log(`${pre.billId ? "Entered bill" : "Added expense"}: ${data.description} ${money(data.amount)} – ${data.category} (${unpaid ? "not paid yet" : "paid by " + data.method})`);
+        attachExpensePhotos(form, data, await store.add("expenses", data));
+        await log(`${pre.billId ? "Entered bill" : "Added expense"}: ${data.description} ${money(data.amount)} – ${data.category} (${unpaid ? "not paid yet" : "paid by " + data.method})${data.voucherNo ? `, payment voucher no. ${data.voucherNo}` : ""}`);
       }
       U.toast("Saved");
     }
@@ -1541,27 +1759,313 @@ function openReceipt(id) {
   const m = memberById(p.memberId);
   const ms = p.membershipId ? membershipById(p.membershipId) : null;
   const forText = ms ? whatOf(ms) : `${p.type}${p.note && !/^from /.test(p.note) ? " – " + p.note : ""}`;
-  const text = `${p.receipt ? `Receipt ${p.receipt} – ` : ""}${S.settings.clubName}\nReceived from: ${p.memberName || p.payerName}\nAmount: ${money(p.amount)}\nFor: ${forText}\nMethod: ${p.method}\nDate: ${fmtDate(p.date)}\nThank you!`;
+  const text = `${S.settings.clubName}: Receipt voucher${p.bookNo ? ` no. ${p.bookNo}` : p.receipt ? ` ${p.receipt}` : ""}\nReceived from: ${p.memberName || p.payerName}\nThe sum of: ${money(p.amount)}\nBeing: ${forText}\nCash / cheque: ${p.method}\nDate: ${fmtDate(p.date)}\nThank you!`;
   const wa = m ? U.waLink(m.phone || m.guardianPhone, text) : "";
   modal({
-    title: p.receipt ? `Receipt ${p.receipt}` : "Payment",
+    title: p.bookNo ? `Receipt voucher no. ${p.bookNo}` : p.receipt ? `Receipt ${p.receipt}` : "Payment",
     body: `<div class="receipt">
-      <div class="r-head"><div><img src="images/logo.png" alt="${esc(S.settings.clubName)}"><div class="hint" style="margin-top:6px">Lavender Tower, P6-610, Emirates City, Ajman<br>+971 56 261 3563</div></div>
-        <div style="text-align:right"><b style="font-size:18px">RECEIPT</b><br>${esc(p.receipt || "")}<br>${fmtDate(p.date)}</div></div>
-      <table><tr><td>Received from</td><td>${esc(p.memberName || p.payerName)}</td></tr>
-        <tr><td>For</td><td>${esc(forText)}</td></tr>
-        <tr><td>Payment method</td><td>${esc(p.method)}</td></tr>
-        <tr class="total"><td>Amount</td><td>${money(p.amount)}</td></tr></table>
+      <div class="r-head"><div><img src="images/logo.png" alt="${esc(S.settings.clubName)}"><div class="hint" style="margin-top:6px">Emirates City, Ajman, UAE, Lavender Tower, P6-610<br>+971 56 261 3563 · +971 6 529 1092<br>www.wariorsmartialarts.com</div></div>
+        <div style="text-align:right"><b style="font-size:18px">RECEIPT VOUCHER</b><br><span dir="rtl">سند قبض</span><br>${p.bookNo ? `No. <b style="color:#c0362c">${esc(p.bookNo)}</b>` : esc(p.receipt || "")}<br>Date: ${fmtDate(p.date)}</div></div>
+      <table><tr><td>Received from Mr./M/s</td><td>${esc(p.memberName || p.payerName)}</td></tr>
+        <tr><td>Being</td><td>${esc(forText)}</td></tr>
+        <tr><td>Cash / cheque</td><td>${esc(p.method)}</td></tr>
+        <tr class="total"><td>The sum of Dhs</td><td>${money(p.amount)}</td></tr></table>
       <p class="hint" style="margin-top:14px">Recorded by ${esc(p.createdBy || "")}. Thank you for training with us!</p></div>`,
     footer: `<footer>${wa ? `<a class="btn wa left" href="${esc(wa)}" target="_blank" rel="noopener">Send on WhatsApp</a>` : ""}<button type="button" class="btn" data-close>Close</button><button type="button" class="btn primary" data-act="print">Print</button></footer>`
   });
 }
 
+// ---------- Receipt photos ----------
+// There's no file storage on the free Firebase plan, so photos are shrunk in the browser and saved in the database:
+// receipts/{id} holds the details plus a small preview, receiptImages/{id} the full photo (a document holds up to 1 MB).
+const PHOTO_SIDE = 1400, PHOTO_CHARS = 520000, THUMB_SIDE = 360, THUMB_CHARS = 45000;
+
+function drawJpeg(img, side, maxChars) {
+  let scale = Math.min(1, side / Math.max(img.width, img.height));
+  for (let i = 0; i < 6; i++, scale *= 0.8) {
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.width * scale));
+    c.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    for (const q of [0.68, 0.56, 0.45]) {
+      const url = c.toDataURL("image/jpeg", q);
+      if (url.length <= maxChars) return { url, w: c.width, h: c.height };
+    }
+  }
+  throw new Error("too big");
+}
+async function shrinkPhoto(file) {
+  const src = URL.createObjectURL(file);
+  try {
+    let img;
+    try { img = await createImageBitmap(file, { imageOrientation: "from-image" }); }
+    catch { img = new Image(); img.src = src; await img.decode(); }
+    const full = drawJpeg(img, PHOTO_SIDE, PHOTO_CHARS);
+    const thumb = drawJpeg(img, THUMB_SIDE, THUMB_CHARS);
+    img.close?.();
+    return { full, thumb };
+  } catch {
+    throw new Error(`Couldn't read ${file.name || "a photo"}.${/hei[cf]/i.test(file.type + file.name) ? " iPhone HEIC photos: choose them from this page on the phone, or save them as JPEG first." : " Use a JPG or PNG photo."}`);
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}
+const isPhoto = f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|hei[cf])$/i.test(f.name || "");
+
+// Saves photos as receipts. pre: details to fill in (from a payment). opts.stay: don't jump to the Receipt photos page.
+async function addReceiptPhotos(files, pre = {}, opts = {}) {
+  const list = [...files].filter(isPhoto);
+  if (!list.length) { U.toast("Those aren't photos. Use JPG or PNG pictures of the receipts.", "error"); return []; }
+  U.toast(`Saving ${list.length} receipt photo${list.length === 1 ? "" : "s"}…`);
+  if (!opts.stay && S.route !== "receipts" && !document.querySelector(".modal-backdrop")) { S.ui.rcFilter = "unsent"; location.hash = "#receipts"; }
+  const ids = [], errors = [];
+  for (const file of list) {
+    try {
+      const { full, thumb } = await shrinkPhoto(file);
+      const id = store.newId("receipts");
+      await store.set(PHOTOS, id, { data: full.url, createdAt: U.nowISO() });
+      await store.set("receipts", id, {
+        kind: pre.kind || S.ui.rcKind || "in", date: pre.date || U.todayISO(), number: pre.number || "", amount: pre.amount || "",
+        memberId: pre.memberId || "", memberName: pre.memberName || "", name: pre.name || pre.memberName || "",
+        method: pre.method || "", chequeNo: "", bank: "", being: pre.being || "",
+        paymentId: pre.paymentId || "", expenseId: pre.expenseId || "", note: "", thumb: thumb.url, w: full.w, h: full.h, bytes: full.url.length, fileName: file.name || "",
+        sentAt: "", sentBy: "", createdAt: U.nowISO(), createdBy: who()
+      });
+      ids.push(id);
+    } catch (err) {
+      console.error(err);
+      errors.push(err.message || String(err));
+    }
+  }
+  if (ids.length) {
+    await log(`Added ${ids.length} ${VOUCHER[pre.kind || S.ui.rcKind || "in"].toLowerCase()} photo${ids.length === 1 ? "" : "s"}${pre.name ? ` for ${pre.name}` : ""}${pre.number ? ` (no. ${pre.number})` : ""}`);
+    U.toast(`Saved ${ids.length} receipt photo${ids.length === 1 ? "" : "s"}`);
+  }
+  errors.slice(0, 3).forEach(e => U.toast(e, "error"));
+  return ids;
+}
+
+function dataUrlToFile(url, name) {
+  const [head, b64] = url.split(",");
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new File([bytes], name, { type: (head.match(/:(.*?);/) || [, "image/jpeg"])[1] });
+}
+const receiptFileName = r => `${r.kind === "out" ? "payment-voucher" : "receipt-voucher"}-${r.date || ""}${r.number ? "-no" + r.number : ""}${r.name || r.memberName ? "-" + (r.name || r.memberName) : ""}`.replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").slice(0, 80) + ".jpg";
+async function photoFile(r) {
+  const d = await store.get(PHOTOS, r.id);
+  return d?.data ? dataUrlToFile(d.data, receiptFileName(r)) : null;
+}
+function downloadFile(file) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(file);
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+}
+// Only web links and WhatsApp/email links are allowed for the accountant (the setting is typed by staff).
+const safeLink = s => { const v = String(s || "").trim(); return /^(https:\/\/|mailto:|whatsapp:)/i.test(v) ? v : /^chat\.whatsapp\.com\//i.test(v) ? "https://" + v : ""; };
+// The message sent with the photos: receipt vouchers (money in) and payment vouchers (money out), each with a total.
+function receiptSummary(list) {
+  const part = (kind, title) => {
+    const rows = list.filter(r => (r.kind || "in") === kind);
+    if (!rows.length) return "";
+    const lines = rows.map(r => `- ${[r.number ? `No. ${r.number}` : "No number", fmtDate(r.date), r.name || r.memberName, r.amount ? money(r.amount) : "", r.method, r.being].filter(Boolean).join(" · ")}`);
+    const total = sum(rows, r => r.amount);
+    return `${title} (${rows.length}):\n${lines.join("\n")}${total ? `\nTotal: ${money(total)}` : ""}`;
+  };
+  return [`${S.settings.clubName}, vouchers of ${fmtDate(U.todayISO())}`, part("in", "Receipt vouchers / سند قبض, money in"), part("out", "Payment vouchers / سند صرف, money out")].filter(Boolean).join("\n\n");
+}
+
+// Prepares the photos first, then the person taps Share (phones only share right after a tap).
+async function sendReceipts(ids) {
+  const queue = ids.map(id => S.receipts.find(r => r.id === id)).filter(Boolean).sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  if (!queue.length) return U.toast("Choose the receipts to send first.", "error");
+  const BATCH = 10;
+  const link = safeLink(S.settings.accountantLink);
+  const to = S.settings.accountantName || "the accountant";
+  let done = 0, files = [], batch = [];
+  const h = modal({
+    title: `Send to ${to}`,
+    body: `<div id="sr-body"><p class="hint">Getting the photos ready…</p></div>`,
+    footer: `<footer id="sr-foot"><button type="button" class="btn" data-close>Close</button></footer>`
+  });
+  const body = h.el.querySelector("#sr-body"), foot = h.el.querySelector("#sr-foot");
+  const markSent = async list => {
+    await store.updateMany(list.map(r => ["receipts", r.id, { sentAt: U.nowISO(), sentBy: who(), sentTo: to }]));
+    await log(`Sent ${list.length} receipt${list.length === 1 ? "" : "s"} to ${to}${sum(list, r => r.amount) ? ` (${money(sum(list, r => r.amount))})` : ""}`);
+    S.ui.rcSel = S.ui.rcSel.filter(id => !list.some(r => r.id === id));
+    done += list.length;
+  };
+  const step = async () => {
+    batch = queue.slice(done, done + BATCH);
+    if (!batch.length) {
+      body.innerHTML = `<div class="callout ok">All ${queue.length} receipt${queue.length === 1 ? "" : "s"} sent to ${esc(to)} and marked as sent.</div>`;
+      foot.innerHTML = `<button type="button" class="btn primary" data-close>Done</button>`;
+      return;
+    }
+    body.innerHTML = `<p class="hint">Getting ${batch.length} photo${batch.length === 1 ? "" : "s"} ready…</p>`;
+    files = (await Promise.all(batch.map(photoFile))).filter(Boolean);
+    if (!h.el.isConnected) return;
+    if (files.length < batch.length) U.toast(`${batch.length - files.length} photo${batch.length - files.length === 1 ? " is" : "s are"} missing and will be skipped.`, "error");
+    const canShare = !!(navigator.canShare && files.length && navigator.canShare({ files }));
+    const text = receiptSummary(batch);
+    body.innerHTML = `
+      ${queue.length > BATCH ? `<div class="callout info">${queue.length} receipts: sending them ${BATCH} at a time. ${done ? `${done} sent so far.` : ""}</div>` : ""}
+      <div class="rc-strip">${batch.map(r => `<img src="${esc(r.thumb)}" alt="">`).join("")}</div>
+      <label for="sr-text" style="margin-top:12px">Message with the photos</label><textarea id="sr-text" rows="5">${esc(text)}</textarea>
+      <p class="hint">${canShare
+        ? `Tap <b>Share</b>, choose <b>WhatsApp</b>, then <b>${esc(to)}</b>. They're marked as sent when you finish.`
+        : `This browser can't attach photos to WhatsApp directly. Tap <b>Download photos</b>, then ${link ? `<b>Open ${esc(to)}</b> and drag the photos into the chat` : "send them to the accountant"}. Then tap <b>Mark as sent</b>.`}</p>`;
+    foot.innerHTML = `<button type="button" class="btn left" data-close>Close</button>
+      ${canShare ? `<button type="button" class="btn primary" id="sr-share">Share ${files.length} photo${files.length === 1 ? "" : "s"}</button>`
+        : `<button type="button" class="btn" id="sr-dl">Download photos</button>${link ? `<a class="btn" href="${esc(link)}" target="_blank" rel="noopener">Open ${esc(to)}</a>` : ""}<button type="button" class="btn primary" id="sr-mark">Mark as sent</button>`}`;
+    const msg = () => h.el.querySelector("#sr-text").value;
+    h.el.querySelector("#sr-share")?.addEventListener("click", async () => {
+      // WhatsApp sometimes drops the text when photos are shared, so it's also copied to paste in the chat.
+      navigator.clipboard?.writeText(msg()).catch(() => {});
+      try {
+        await navigator.share({ files, text: msg() });
+      } catch (err) {
+        if (err.name === "AbortError") return; // closed the share menu: nothing sent
+        return U.toast("Sharing didn't work: " + (err.message || err), "error");
+      }
+      await markSent(batch);
+      U.toast(`${batch.length} marked as sent`);
+      step();
+    });
+    h.el.querySelector("#sr-dl")?.addEventListener("click", () => {
+      files.forEach((f, i) => setTimeout(() => downloadFile(f), i * 350));
+      (navigator.clipboard ? navigator.clipboard.writeText(msg()) : Promise.reject())
+        .then(() => U.toast("Photos downloading. The message is copied: paste it in the chat."), () => U.toast("Photos downloading."));
+    });
+    h.el.querySelector("#sr-mark")?.addEventListener("click", async () => { await markSent(batch); step(); });
+  };
+  step().catch(err => { U.toast(err.message || String(err), "error"); h.close(); });
+}
+
+function openReceiptPhoto(id) {
+  const r = S.receipts.find(x => x.id === id);
+  if (!r) return;
+  let blobUrl = "";
+  const kind0 = r.kind || "in";
+  const h = modal({
+    title: `${VOUCHER[kind0]}${r.number ? ` no. ${r.number}` : ""}`, wide: true,
+    body: `<div class="rc-detail">
+      <a class="rc-big" id="rd-big" target="_blank" rel="noopener" title="Open full size"><img id="rd-img" src="${esc(r.thumb)}" alt="Voucher photo"></a>
+      <div class="fgrid">
+        <div class="full"><label for="rd-kind">Type</label><select id="rd-kind" name="kind">${options([["in", "Receipt voucher (سند قبض): money in"], ["out", "Payment voucher (سند صرف): money out"]], kind0)}</select></div>
+        <div><label for="rd-no">No.</label><input id="rd-no" name="number" maxlength="30" value="${esc(r.number)}" autocomplete="off" placeholder="The red number"></div>
+        <div><label for="rd-date">Date</label><input id="rd-date" name="date" type="date" value="${esc(r.date)}"></div>
+        <div class="full" data-k="in"><label for="rd-member">Received from (member)</label><select id="rd-member" name="memberId">${memberOptions(r.memberId)}</select></div>
+        <div class="full" id="rd-name-wrap"><label for="rd-name" id="rd-name-label">Name</label><input id="rd-name" name="name" maxlength="100" value="${esc(r.memberId ? "" : r.name || "")}"></div>
+        <div><label for="rd-amount">The sum of (${esc(S.settings.currency)})</label><input id="rd-amount" name="amount" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(r.amount)}"></div>
+        <div><label for="rd-method">Cash / cheque</label><select id="rd-method" name="method">${options([...new Set([...METHODS, r.method || ""])].filter(Boolean), r.method || "Cash", { blank: "—" })}</select></div>
+        <div data-cheque><label for="rd-cheque">Cheque no.</label><input id="rd-cheque" name="chequeNo" maxlength="40" value="${esc(r.chequeNo)}"></div>
+        <div data-cheque><label for="rd-bank">Bank</label><input id="rd-bank" name="bank" maxlength="60" value="${esc(r.bank)}"></div>
+        <div class="full"><label for="rd-being">Being (what it's for)</label><input id="rd-being" name="being" maxlength="200" value="${esc(r.being)}" placeholder="e.g. 1 month MMA, gloves, electricity bill"></div>
+        <div class="full" data-k="in"><label for="rd-pay">Payment in the system</label><select id="rd-pay" name="paymentId"></select></div>
+        <div class="full" data-k="out"><label for="rd-exp">Expense in the system</label><select id="rd-exp" name="expenseId"></select></div>
+        <div class="full"><label for="rd-note">Note</label><input id="rd-note" name="note" maxlength="200" value="${esc(r.note)}"></div>
+        <div class="full hint">${r.sentAt ? `Sent to ${esc(r.sentTo || "the accountant")} ${U.fmtWhen(r.sentAt)}${r.sentBy ? ` by ${esc(r.sentBy)}` : ""}. <button type="button" class="linkish" data-act="rc-unsend" data-id="${esc(id)}">Mark as not sent</button>` : "Not sent to the accountant yet."}<br>Added ${U.fmtWhen(r.createdAt)}${r.createdBy ? ` by ${esc(r.createdBy)}` : ""}.</div>
+      </div></div>`,
+    footer: `<footer><button type="button" class="btn danger left" data-act="rc-del" data-id="${esc(id)}">Delete</button><button type="button" class="btn" data-act="rc-download" data-id="${esc(id)}">Download</button><button type="button" class="btn" data-act="rc-send-one" data-id="${esc(id)}">Send to accountant</button><button class="btn primary" type="submit">Save</button></footer>`,
+    onOpen(el) {
+      const f = el.querySelector("form");
+      store.get(PHOTOS, id).then(d => {
+        if (!d?.data || !el.isConnected) return;
+        el.querySelector("#rd-img").src = d.data;
+        blobUrl = URL.createObjectURL(dataUrlToFile(d.data, receiptFileName(r)));
+        el.querySelector("#rd-big").href = blobUrl;
+      }).catch(err => U.toast("Couldn't load the full photo: " + (err.message || err), "error"));
+      const day = () => f.date.value || r.date || U.todayISO();
+      const closest = (a, b) => Math.abs(U.diffDays(day(), a.date || day())) - Math.abs(U.diffDays(day(), b.date || day()));
+      const fillLinks = () => {
+        const mid = f.memberId.value;
+        const pays = S.payments.filter(p => (mid ? p.memberId === mid : Math.abs(U.diffDays(day(), p.date || day())) <= 31) || p.id === r.paymentId).sort(closest).slice(0, 60);
+        const pickP = f.paymentId.value || r.paymentId;
+        f.paymentId.innerHTML = `<option value="">— Not linked —</option>` + pays.map(p => `<option value="${esc(p.id)}"${p.id === pickP ? " selected" : ""}>${fmtDate(p.date)} · ${esc(p.memberName || p.payerName || "—")} · ${esc(money(p.amount))}${p.bookNo ? ` · no. ${esc(p.bookNo)}` : ""}</option>`).join("");
+        const exps = S.expenses.filter(x => Math.abs(U.diffDays(day(), x.date || day())) <= 31 || x.id === r.expenseId).sort(closest).slice(0, 60);
+        const pickE = f.expenseId.value || r.expenseId;
+        f.expenseId.innerHTML = `<option value="">— Not linked —</option>` + exps.map(x => `<option value="${esc(x.id)}"${x.id === pickE ? " selected" : ""}>${fmtDate(x.date)} · ${esc(x.description || x.category)}${x.vendor ? ` · ${esc(x.vendor)}` : ""} · ${esc(money(x.amount))}${x.voucherNo ? ` · no. ${esc(x.voucherNo)}` : ""}</option>`).join("");
+      };
+      // Show the fields of the chosen voucher type, and the cheque fields only for cheques.
+      const sync = () => {
+        const k = f.kind.value;
+        el.querySelectorAll("[data-k]").forEach(n => { n.hidden = n.dataset.k !== k; });
+        el.querySelector("#rd-name-wrap").hidden = k === "in" && !!f.memberId.value;
+        el.querySelector("#rd-name-label").textContent = k === "in" ? "Received from (name, if not a member)" : "Paid to";
+        el.querySelectorAll("[data-cheque]").forEach(n => { n.hidden = f.method.value !== "Cheque"; });
+        el.querySelector("h2").textContent = `${VOUCHER[k]}${f.number.value ? ` no. ${f.number.value}` : ""}`;
+      };
+      f.kind.addEventListener("change", sync);
+      f.method.addEventListener("change", sync);
+      f.number.addEventListener("input", sync);
+      f.memberId.addEventListener("change", () => { fillLinks(); sync(); });
+      f.date.addEventListener("change", fillLinks);
+      f.paymentId.addEventListener("change", () => {
+        const p = S.payments.find(x => x.id === f.paymentId.value);
+        if (!p) return;
+        if (!f.amount.value) f.amount.value = p.amount;
+        if (!f.number.value && p.bookNo) f.number.value = p.bookNo;
+        if (!f.memberId.value && p.memberId) f.memberId.value = p.memberId;
+        if (!f.memberId.value && !f.name.value) f.name.value = p.payerName || "";
+        if (!f.being.value) f.being.value = p.type || "";
+        if (p.method) f.method.value = p.method;
+        if (p.date) f.date.value = p.date;
+        sync();
+      });
+      f.expenseId.addEventListener("change", () => {
+        const x = S.expenses.find(e => e.id === f.expenseId.value);
+        if (!x) return;
+        if (!f.amount.value) f.amount.value = x.amount;
+        if (!f.number.value && x.voucherNo) f.number.value = x.voucherNo;
+        if (!f.name.value) f.name.value = x.vendor || "";
+        if (!f.being.value) f.being.value = x.description || "";
+        if (x.method && [...f.method.options].some(o => o.value === x.method)) f.method.value = x.method;
+        if (x.date) f.date.value = x.date;
+        sync();
+      });
+      fillLinks();
+      sync();
+      const obs = new MutationObserver(() => { if (!el.isConnected) { obs.disconnect(); if (blobUrl) URL.revokeObjectURL(blobUrl); } });
+      obs.observe($("modal-root"), { childList: true });
+    },
+    async onSubmit(d) {
+      const inn = d.kind === "in";
+      const m = inn ? memberById(d.memberId) : null;
+      // A voucher number that matches exactly one payment (or expense) links them automatically.
+      const byNo = (list, field) => { const hits = d.number ? list.filter(x => String(x[field] || "").trim() === d.number) : []; return hits.length === 1 ? hits[0] : null; };
+      const p = inn ? S.payments.find(x => x.id === d.paymentId) || byNo(S.payments, "bookNo") : null;
+      const x = inn ? null : S.expenses.find(e => e.id === d.expenseId) || byNo(S.expenses, "voucherNo");
+      const pm = p && !m ? memberById(p.memberId) : null;
+      const who2 = m || pm;
+      const patch = {
+        kind: d.kind, number: d.number, date: d.date, amount: d.amount === "" ? "" : num(d.amount),
+        memberId: who2 ? who2.id : "", memberName: who2 ? who2.name : "", name: who2 ? who2.name : d.name || p?.payerName || x?.vendor || "",
+        method: d.method, chequeNo: d.method === "Cheque" ? d.chequeNo : "", bank: d.method === "Cheque" ? d.bank : "", being: d.being,
+        paymentId: p ? p.id : "", expenseId: x ? x.id : "", note: d.note
+      };
+      await store.update("receipts", id, patch);
+      if (p && d.number && !p.bookNo) await store.update("payments", p.id, { bookNo: d.number });
+      if (x && d.number && !x.voucherNo) await store.update("expenses", x.id, { voucherNo: d.number });
+      await log(`Edited ${VOUCHER[d.kind].toLowerCase()} photo${d.number ? ` no. ${d.number}` : ""}${patch.name ? ` (${patch.name})` : ""}${p ? `, linked to the ${money(p.amount)} payment of ${fmtDate(p.date)}` : x ? `, linked to the expense "${x.description}" of ${fmtDate(x.date)}` : ""}`);
+      U.toast((p && !d.paymentId) || (x && !d.expenseId) ? `Saved and linked by its number to the ${p ? "payment" : "expense"} of ${fmtDate((p || x).date)}` : "Saved");
+    }
+  });
+  return h;
+}
+
 // ---------- CSV import / export ----------
 const MEMBER_COLS = [["Name", "name"], ["Phone", "phone"], ["Kid or adult", "ageGroup"], ["Guardian name", "guardianName"], ["Guardian phone", "guardianPhone"], ["Programs", m => (m.programs || []).join("; ")],
   ["Status", m => stateOf(m).state], ["Plan", m => latestOf(m.id)?.plan || ""], ["Membership start", m => latestOf(m.id)?.startDate || ""], ["Membership end", m => latestOf(m.id)?.endDate || ""],
-  ["Owes", m => owedOf(m).total || ""], ["Member since", "joinDate"], ["Cancelled on", "cancelDate"], ["Cancel reason", "cancelReason"], ["Email", "email"], ["Belt / rank", "belt"], ["Notes", "notes"]];
-const PAY_COLS = [["Date", "date"], ["Receipt", "receipt"], ["Member / payer", p => p.memberName || p.payerName], ["Type", p => p.type || "Membership"], ["For", p => { const ms = p.membershipId ? membershipById(p.membershipId) : null; return ms ? whatOf(ms) : ""; }], ["Amount", "amount"], ["Method", "method"], ["Note", "note"], ["Recorded by", "createdBy"]];
+  ["Owes", m => owedOf(m).total || ""], ["Joining date", "joinDate"], ["Date of birth", "dob"], ["Cancelled on", "cancelDate"], ["Cancel reason", "cancelReason"], ["Asked to renew", m => m.cancelAskedAt ? m.cancelAskedAt.slice(0, 10) : ""], ["Answer", "cancelAnswer"], ["Email", "email"], ["Belt / rank", "belt"], ["Notes", "notes"]];
+const PAY_COLS = [["Date", "date"], ["Receipt", "receipt"], ["Receipt no.", "bookNo"], ["Member / payer", p => p.memberName || p.payerName], ["Type", p => p.type || "Membership"], ["For", p => { const ms = p.membershipId ? membershipById(p.membershipId) : null; return ms ? whatOf(ms) : ""; }], ["Amount", "amount"], ["Method", "method"], ["Note", "note"], ["Recorded by", "createdBy"]];
 
 function exportData(kind) {
   const stamp = U.todayISO();
@@ -1666,10 +2170,11 @@ function openImportMembers() {
   });
 }
 
-async function backup() {
-  const data = await store.exportAll();
-  U.download(`wariors-backup-${U.todayISO()}.json`, JSON.stringify(data, null, 1), "application/json");
-  await log("Downloaded a full backup");
+async function backup(photos) {
+  U.toast(photos ? "Preparing the backup with photos. This can take a minute…" : "Preparing the backup…");
+  const data = await store.exportAll({ photos });
+  U.download(`wariors-backup-${U.todayISO()}${photos ? "-with-photos" : ""}.json`, JSON.stringify(data, null, photos ? 0 : 1), "application/json");
+  await log(`Downloaded a full backup${photos ? ` with ${(data[PHOTOS] || []).length} receipt photos` : ""}`);
 }
 
 function openRestore() {
@@ -1682,7 +2187,7 @@ function openRestore() {
         const info = el.querySelector("#rs-info");
         try {
           data = JSON.parse(await e.target.files[0].text());
-          info.innerHTML = `<div class="callout info">File from ${U.fmtWhen(data.exportedAt)}: ${COLLECTIONS.filter(c => (data[c] || []).length).map(c => `${(data[c] || []).length} ${c}`).join(", ")}${(data.settings || []).length ? ", settings" : ""}.</div>`;
+          info.innerHTML = `<div class="callout info">File from ${U.fmtWhen(data.exportedAt)}: ${[...COLLECTIONS, PHOTOS].filter(c => (data[c] || []).length).map(c => `${(data[c] || []).length} ${c === PHOTOS ? "receipt photos" : c}`).join(", ")}${(data.settings || []).length ? ", settings" : ""}.</div>`;
         } catch {
           data = null;
           info.innerHTML = `<div class="callout bad">That file isn't a valid backup.</div>`;
@@ -1692,7 +2197,8 @@ function openRestore() {
     async onSubmit() {
       if (!data) { U.toast("Choose a file first.", "error"); return false; }
       let n = 0;
-      for (const c of COLLECTIONS) if (Array.isArray(data[c]) && data[c].length) n += await store.addMany(c, data[c]);
+      // Photos first, so no receipt ever shows without its photo.
+      for (const c of [PHOTOS, ...COLLECTIONS]) if (Array.isArray(data[c]) && data[c].length) n += await store.addMany(c, data[c]);
       const st = (data.settings || []).find(s => s.id === "main");
       if (st) { const { id, ...rest } = st; await store.set("settings", "main", rest); }
       await log(`Imported ${n} records from a file of ${U.fmtWhen(data.exportedAt)}`);
@@ -1818,16 +2324,69 @@ const ACTIONS = {
   async remind(id, el) {
     const m = memberById(id);
     if (!m) return;
+    if (el.dataset.kind === "cancel") {
+      await store.update("members", id, { cancelAskedAt: U.nowISO(), cancelAskedBy: who(), cancelAnswer: "" });
+      await log(`Asked ${m.name} on WhatsApp whether they want to cancel for sure or renew`);
+      return;
+    }
     await store.update("members", id, { lastReminderAt: U.nowISO() });
     await log(`Sent WhatsApp ${el.dataset.kind === "renewal" ? "renewal" : "payment"} reminder to ${m.name}`);
   },
+  async "cancel-answer"(id, el) {
+    const m = memberById(id);
+    const answer = ANSWERS[el.dataset.answer];
+    await store.update("members", id, { cancelAnswer: answer, cancelAnswerAt: U.nowISO(), cancelAnswerBy: who(), ...(m.cancelAskedAt ? {} : { cancelAskedAt: U.nowISO(), cancelAskedBy: who() }) });
+    await log(`${m.name} (cancelled): ${answer}`);
+    if (el.dataset.answer === "renew") { U.toast(`Renew ${m.name} now: fill in the membership.`); openMembership({ memberId: id }); }
+    else U.toast(`${m.name}: ${answer}`);
+  },
   receipt: id => openReceipt(id),
   print() { document.body.classList.add("printing"); window.print(); setTimeout(() => document.body.classList.remove("printing"), 300); },
+  "edit-payment": id => openEditPayment(id),
   async "del-payment"(id) {
     const p = S.payments.find(x => x.id === id);
     if (!(await U.confirmBox(`Delete the payment of ${money(p.amount)} from ${esc(p.memberName || p.payerName)} on ${fmtDate(p.date)}? It stays in the activity log.`, { danger: true, okLabel: "Delete payment" }))) return;
     await store.remove("payments", id);
     await log(`Deleted payment ${p.receipt || ""}: ${money(p.amount)} from ${p.memberName || p.payerName} (${p.date})`);
+    document.querySelectorAll(".modal-backdrop").forEach(el => { if (el.querySelector(`#ep-member`) && el.querySelector(`[data-act="del-payment"][data-id="${CSS.escape(id)}"]`)) el.remove(); });
+  },
+  // Receipt photos
+  "rc-add"() {
+    const inp = document.createElement("input");
+    Object.assign(inp, { type: "file", accept: "image/*", multiple: true, hidden: true });
+    inp.addEventListener("change", () => { addReceiptPhotos([...inp.files]); inp.remove(); });
+    document.body.appendChild(inp);
+    inp.click();
+  },
+  "rc-open": id => openReceiptPhoto(id),
+  "rc-clear"() { S.ui.rcSel = []; render(); },
+  "rc-send"() {
+    const sel = S.ui.rcSel.filter(id => S.receipts.some(r => r.id === id));
+    sendReceipts(sel.length ? sel : S.receipts.filter(r => !r.sentAt && (!S.ui.rcType || (r.kind || "in") === S.ui.rcType)).map(r => r.id));
+  },
+  "rc-send-one": id => sendReceipts([id]),
+  async "rc-download"(id) {
+    const r = S.receipts.find(x => x.id === id);
+    const f = await photoFile(r);
+    if (!f) return U.toast("The full photo is missing.", "error");
+    downloadFile(f);
+  },
+  async "rc-unsend"(id) {
+    const r = S.receipts.find(x => x.id === id);
+    await store.update("receipts", id, { sentAt: "", sentBy: "", sentTo: "" });
+    await log(`Marked receipt photo${r.number ? ` no. ${r.number}` : ""} as not sent`);
+    document.querySelectorAll(".modal-backdrop").forEach((el, i, all) => { if (i === all.length - 1) el.remove(); });
+    U.toast("Marked as not sent");
+  },
+  async "rc-del"(id) {
+    const r = S.receipts.find(x => x.id === id);
+    if (!(await U.confirmBox(`Delete this receipt photo${r.number ? ` (no. ${esc(r.number)})` : ""}? This can't be undone.`, { danger: true, okLabel: "Delete photo" }))) return;
+    await store.remove("receipts", id);
+    await store.remove(PHOTOS, id);
+    await log(`Deleted receipt photo${r.number ? ` no. ${r.number}` : ""}${r.memberName ? ` (${r.memberName})` : ""}`);
+    S.ui.rcSel = S.ui.rcSel.filter(x => x !== id);
+    document.querySelectorAll(".modal-backdrop").forEach(el => { if (el.querySelector("#rd-img")) el.remove(); });
+    U.toast("Photo deleted");
   },
   "cancel-member": id => openCancel(id),
   "pause-member": id => openPause(id),
@@ -1908,7 +2467,7 @@ const ACTIONS = {
     U.download("members-template.csv", U.toCSV([{ name: "Example Name", phone: "050 123 4567", ageGroup: "Adults", programs: ["MMA"], plan: "Monthly", amount: 200, startDate: U.todayISO(), endDate: U.addMonthsISO(U.todayISO(), 1) }],
       [["Name", "name"], ["Phone", "phone"], ["Kid or adult", "ageGroup"], ["Guardian name", "guardianName"], ["Guardian phone", "guardianPhone"], ["Programs", m => (m.programs || []).join("; ")], ["Plan", "plan"], ["Amount", "amount"], ["Start date", "startDate"], ["End date", "endDate"], ["Status", () => "active"], ["Notes", "notes"]]));
   },
-  backup: () => backup(),
+  backup: kind => backup(kind === "photos"),
   restore: () => openRestore(),
   "save-settings": () => saveSettings(),
   "reset-draft"() { S.ui.draft = null; render(); },
@@ -1930,6 +2489,7 @@ const ACTIONS = {
       body: `<div class="quick-grid">
         <button type="button" class="btn primary" data-act="new-membership">New membership / renewal</button>
         <button type="button" class="btn" data-act="new-payment">Record payment</button>
+        <button type="button" class="btn" data-act="rc-add">Add receipt photos</button>
         <button type="button" class="btn" data-act="new-charge">Kit sale or other charge</button>
         <button type="button" class="btn" data-act="checkin">Check someone in</button>
         <button type="button" class="btn" data-act="new-expense">Add expense or bill</button>
@@ -1991,7 +2551,14 @@ document.addEventListener("input", e => {
 document.addEventListener("change", async e => {
   const el = e.target;
   try {
-    if (el.dataset.change === "eq-cond") {
+    if (el.dataset.change === "rc-files") {
+      const files = [...el.files];
+      el.value = "";
+      await addReceiptPhotos(files);
+    } else if (el.dataset.change === "rc-sel") {
+      S.ui.rcSel = el.checked ? [...new Set([...S.ui.rcSel, el.dataset.id])] : S.ui.rcSel.filter(x => x !== el.dataset.id);
+      render();
+    } else if (el.dataset.change === "eq-cond") {
       const item = S.equipment.find(x => x.id === el.dataset.id);
       await store.update("equipment", item.id, { condition: el.value });
       await log(`Equipment condition: ${item.name} ${item.condition} → ${el.value}`);
@@ -2006,6 +2573,30 @@ document.addEventListener("change", async e => {
     U.toast(err.message || String(err), "error");
   }
 });
+
+// Drag photos anywhere onto the admin: they're saved as receipts. If an open form has a photo field, they go there instead.
+let dragDepth = 0;
+const dragsFiles = e => [...(e.dataTransfer?.types || [])].includes("Files");
+const dropDone = () => { dragDepth = 0; document.body.classList.remove("dropping"); };
+document.addEventListener("dragenter", e => { if (!S.user || !dragsFiles(e)) return; e.preventDefault(); dragDepth++; document.body.classList.add("dropping"); });
+document.addEventListener("dragover", e => { if (S.user && dragsFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+document.addEventListener("dragleave", e => { if (dragsFiles(e) && --dragDepth <= 0) dropDone(); });
+document.addEventListener("drop", e => {
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  dropDone();
+  if (!S.user || !e.dataTransfer.files.length) return;
+  const top = [...document.querySelectorAll(".modal-backdrop")].pop();
+  const field = top?.querySelector("input[type=file][data-photo]");
+  if (field) {
+    field.files = e.dataTransfer.files;
+    U.toast(`${field.files.length} photo${field.files.length === 1 ? "" : "s"} added to this form. They're saved when you press Save.`);
+    return;
+  }
+  if (top) return U.toast("Close this window first, then drop the photos.", "error");
+  addReceiptPhotos([...e.dataTransfer.files]).catch(err => U.toast(err.message || String(err), "error"));
+});
+window.addEventListener("dragend", dropDone);
 
 window.addEventListener("hashchange", route);
 $("menu").addEventListener("click", () => $("side").classList.toggle("open"));

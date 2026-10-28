@@ -5,7 +5,9 @@ import { firebaseConfig } from "./firebase-config.js";
 
 export const MODE = firebaseConfig && firebaseConfig.apiKey ? "firebase" : "demo";
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
-export const COLLECTIONS = ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts", "attendance", "activity"];
+export const COLLECTIONS = ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts", "attendance", "activity", "receipts"];
+// Full-size receipt photos, one document per receipt (same id as in "receipts"). Kept out of normal backups because of their size.
+export const PHOTOS = "receiptImages";
 
 // ---------- Firebase ----------
 let fb = null;
@@ -167,6 +169,17 @@ export const store = {
     return fb.fs.onSnapshot(fb.fs.doc(fb.db, col, id), s => cb(s.exists() ? normalize(s.id, s.data()) : null), err => onError && onError(err));
   },
 
+  // One document, read once (null if it doesn't exist).
+  async get(col, id) {
+    if (MODE === "demo") { const d = (lsRead()[col] || {})[id]; return d ? { id, ...d } : null; }
+    const s = await fb.fs.getDoc(fb.fs.doc(fb.db, col, id));
+    return s.exists() ? normalize(s.id, s.data()) : null;
+  },
+  // A new document id, for writing two related documents under the same id.
+  newId(col) {
+    return MODE === "demo" ? newId() : fb.fs.doc(fb.fs.collection(fb.db, col)).id;
+  },
+
   // Writes
   async add(col, data) {
     if (MODE === "demo") {
@@ -208,7 +221,25 @@ export const store = {
     }
     await fb.fs.deleteDoc(fb.fs.doc(fb.db, col, id));
   },
+  // Several updates at once, e.g. a new name copied onto a member's payments. ops: [[col, id, patch], …]
+  async updateMany(ops) {
+    if (!ops.length) return 0;
+    if (MODE === "demo") {
+      const db = lsRead();
+      for (const [col, id, patch] of ops) if (db[col]?.[id]) db[col][id] = { ...db[col][id], ...clean(patch) };
+      lsWrite(db);
+      return ops.length;
+    }
+    const { fs, db } = fb;
+    for (let i = 0; i < ops.length; i += 400) {
+      const batch = fs.writeBatch(db);
+      for (const [col, id, patch] of ops.slice(i, i + 400)) batch.update(fs.doc(db, col, id), clean(patch));
+      await batch.commit();
+    }
+    return ops.length;
+  },
   // Adds many rows; keeps an "id" field as the document id when present.
+  // Photos are big, so they go in small batches (a write request is limited to 10 MB).
   async addMany(col, rows) {
     if (MODE === "demo") {
       const db = lsRead();
@@ -218,9 +249,10 @@ export const store = {
       return rows.length;
     }
     const { fs, db } = fb;
-    for (let i = 0; i < rows.length; i += 400) {
+    const size = col === PHOTOS ? 12 : 400;
+    for (let i = 0; i < rows.length; i += size) {
       const batch = fs.writeBatch(db);
-      for (const r of rows.slice(i, i + 400)) {
+      for (const r of rows.slice(i, i + size)) {
         const ref = r.id ? fs.doc(db, col, r.id) : fs.doc(fs.collection(db, col));
         batch.set(ref, clean(r));
       }
@@ -228,15 +260,16 @@ export const store = {
     }
     return rows.length;
   },
-  // Full copy of every collection plus settings, for backups.
-  async exportAll() {
+  // Full copy of every collection plus settings, for backups. { photos: true } adds the full-size receipt photos.
+  async exportAll({ photos = false } = {}) {
     const out = { exportedAt: new Date().toISOString(), mode: MODE };
+    const cols = [...COLLECTIONS, "settings", ...(photos ? [PHOTOS] : [])];
     if (MODE === "demo") {
       const db = lsRead();
-      for (const c of [...COLLECTIONS, "settings"]) out[c] = Object.entries(db[c] || {}).map(([id, d]) => ({ id, ...d }));
+      for (const c of cols) out[c] = Object.entries(db[c] || {}).map(([id, d]) => ({ id, ...d }));
       return out;
     }
-    for (const c of [...COLLECTIONS, "settings"]) {
+    for (const c of cols) {
       const snap = await fb.fs.getDocs(fb.fs.collection(fb.db, c));
       out[c] = snap.docs.map(d => normalize(d.id, d.data()));
     }

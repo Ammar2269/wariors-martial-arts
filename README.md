@@ -9,9 +9,11 @@ Plain HTML, CSS and JavaScript. There's no build step. Data is stored in **Fireb
 ## What it does
 
 - **Dashboard**: money collected this month, money owed, renewals due, active members, expenses and net. Also lists renewals due, balances owed, kit to hand out, bills, today's classes and recent activity.
-- **Members**: details, guardian, programs and notes. Pause (vacation or hold), cancel (date and reason kept), re-join, and merge duplicates.
+- **Members**: details, joining date, date of birth, guardian, programs and notes. Everything can be edited later, and a corrected name updates on all their payments and memberships. Pause (vacation or hold), cancel (date and reason kept), re-join, and merge duplicates.
+- **Cancelled members**: a WhatsApp message asking whether they want to cancel for sure or renew, with their answer noted (wants to renew, confirmed, no reply).
 - **Memberships & renewals**: each membership has a start date, end date, plan, package price and kit price, like the old Excel sheet. The app works out automatically who is **active**, **ending soon**, **expired** or **owing money**. Renewing takes one tap, and the dates and price fill themselves in from the fee plans.
-- **Payments**: link to a membership or charge to clear a balance. Receipts can be printed or sent on WhatsApp, and WhatsApp reminders cover renewals and money owed. The payment log can be exported per month.
+- **Payments**: link to a membership or charge to clear a balance. Record the receipt voucher number and attach its photo; payments can be edited afterwards. Receipts can be printed or sent on WhatsApp, and WhatsApp reminders cover renewals and money owed. The payment log can be exported per month.
+- **Receipts & vouchers**: photos of the club's paper Receipt Vouchers (سند قبض, money in) and Payment Vouchers (سند صرف, money out). Drag photos anywhere onto the admin, or take them with the phone. Each photo holds the voucher's number, date, name, amount, cash/cheque and "being", and links to its payment or expense. **Send to the accountant** shares the photos (phone share menu → WhatsApp group) with a summary and marks them as sent. Photos are shrunk to about 200 KB and stored in Firestore, so no paid file storage is needed.
 - **Kit & stock**: sell gloves, mouth guards and so on from stock (paid or owed), add stock, and track kit still to hand out.
 - **Expenses & bills**: monthly bills (FEWA, phone, rent…) to tick off, plus expenses paid by cash, petty cash, card or bank.
 - **Class schedule**: the weekly timetable, with today's classes on the dashboard. Edit it in Settings.
