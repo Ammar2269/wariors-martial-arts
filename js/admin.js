@@ -1803,7 +1803,9 @@ const TRIAL_PROGS = [["trMMA", /mma/i], ["trKick", /kick/i], ["trBoxing", /^boxi
 const BANK_METHODS = ["Bank transfer", "Cheque"], CARD_METHODS = ["Card", "Payment link"];
 // A stored date or timestamp as a local YYYY-MM-DD.
 const dayOf = iso => !iso ? "" : iso.length <= 10 ? iso : U.todayISO(new Date(iso));
-const lastNo = list => { const n = list.map(v => String(v || "").trim()).filter(Boolean); return n.sort((a, b) => (Number(a.replace(/\D/g, "")) || 0) - (Number(b.replace(/\D/g, "")) || 0)).pop() || ""; };
+// All of a day's voucher numbers, lowest first, each once: "1290, 1291, 1292".
+const numList = list => [...new Set(list.map(v => String(v ?? "").trim()).filter(Boolean))]
+  .sort((a, b) => (Number(a.replace(/\D/g, "")) || 0) - (Number(b.replace(/\D/g, "")) || 0) || a.localeCompare(b)).join(", ");
 
 // A member's situation on a given day (cancelled / frozen / active / inactive), or null if they hadn't joined yet.
 function clientOn(m, day) {
@@ -1838,12 +1840,12 @@ function dailyAuto(day) {
   v.payBank = round(sum(ps.filter(p => BANK_METHODS.includes(p.method)), p => p.amount));
   v.payCard = round(sum(ps.filter(p => CARD_METHODS.includes(p.method)), p => p.amount));
   v.payCash = round(sum(ps, p => p.amount) - v.payBank - v.payCard);
-  v.closingReceipt = lastNo([...ps.map(p => p.bookNo), ...S.receipts.filter(r => (r.kind || "in") === "in" && r.date === day).map(r => r.number)]);
+  // Every receipt voucher of the day: memberships, admissions, kit… plus receipt photos dated that day.
+  v.closingReceipt = numList([...ps.map(p => p.bookNo), ...S.receipts.filter(r => (r.kind || "in") === "in" && r.date === day).map(r => r.number)]);
   const xs = S.expenses.filter(x => x.status !== "unpaid" && x.date === day);
   v.bankPayments = round(sum(xs.filter(x => [...BANK_METHODS, "Card"].includes(x.method)), x => x.amount));
   v.expenses = round(sum(xs, x => x.amount) - v.bankPayments);
-  const vouchers = [...new Set([...xs.map(x => x.voucherNo), ...S.receipts.filter(r => r.kind === "out" && r.date === day).map(r => r.number)].map(n => String(n || "").trim()).filter(Boolean))];
-  v.voucherNos = vouchers.sort((a, b) => (Number(a.replace(/\D/g, "")) || 0) - (Number(b.replace(/\D/g, "")) || 0)).join(", ");
+  v.voucherNos = numList([...xs.map(x => x.voucherNo), ...S.receipts.filter(r => r.kind === "out" && r.date === day).map(r => r.number)]);
   // Opening cash = the closing balance of the last saved report before this day.
   const prev = S.dailyReports.filter(r => r.date < day).sort((a, b) => b.date.localeCompare(a.date))[0];
   v.openingBalance = prev && prev.values?.closingBalance !== "" && prev.values?.closingBalance != null ? num(prev.values.closingBalance) : "";
@@ -1872,7 +1874,7 @@ function dailyText(day, v) {
 function openDailyReport(day0) {
   const field = (k, label, s, kind) => {
     const text = s.text || kind === "text";
-    return `<div><label for="dr-${k}">${esc(label)}</label><input id="dr-${k}" name="${k}"${text ? ` maxlength="${kind === "text" ? 80 : 40}" autocomplete="off"` : ' type="number" step="any" inputmode="decimal"'}></div>`;
+    return `<div${kind === "text" ? ' class="dr-wide"' : ""}><label for="dr-${k}">${esc(label)}${kind === "text" ? ` <span class="hint">(all of the day's numbers)</span>` : ""}</label><input id="dr-${k}" name="${k}"${text ? ` maxlength="${kind === "text" ? 400 : 40}" autocomplete="off"` : ' type="number" step="any" inputmode="decimal"'}></div>`;
   };
   let saveReport = null;
   const h = modal({

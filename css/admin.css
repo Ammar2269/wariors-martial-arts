@@ -292,6 +292,8 @@ body.dropping::after {
 .dr-sec legend { padding: 0 6px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .dr-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px 10px; }
 .dr-sec .hint { margin: 8px 0 0; }
+.dr-sec label .hint { margin: 0; font-weight: 400; }
+.dr-fields .dr-wide { grid-column: 1 / -1; }
 .dr-preview { position: sticky; top: 0; }
 .dr-preview textarea { min-height: 62vh; font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; background: var(--panel-2); }
 @media (max-width: 760px) {
