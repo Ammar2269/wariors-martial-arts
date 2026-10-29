@@ -27,10 +27,10 @@ service cloud.firestore {
     }
 
     // Everything else in the dashboard: staff only. Nothing is readable without signing in.
-    // receipts = receipt details and a small preview; receiptImages = the full-size photos.
+    // receipts = receipt details and a small preview; receiptImages = the full-size photos; dailyReports = one per day.
     match /{col}/{id} {
       allow read, write: if isAdmin()
-        && col in ['members', 'memberships', 'payments', 'expenses', 'equipment', 'leads', 'handouts', 'attendance', 'settings', 'receipts', 'receiptImages'];
+        && col in ['members', 'memberships', 'payments', 'expenses', 'equipment', 'leads', 'handouts', 'attendance', 'settings', 'receipts', 'receiptImages', 'dailyReports'];
     }
   }
 }

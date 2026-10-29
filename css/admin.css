@@ -284,6 +284,23 @@ body.dropping::after {
   .rc-big img { max-height: 46vh; }
 }
 
+/* Daily report */
+.dr-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.dr-date { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.dr-date > div { flex: 1 1 160px; }
+.dr-sec { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 12px; margin: 0 0 12px; min-width: 0; }
+.dr-sec legend { padding: 0 6px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.dr-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px 10px; }
+.dr-sec .hint { margin: 8px 0 0; }
+.dr-preview { position: sticky; top: 0; }
+.dr-preview textarea { min-height: 62vh; font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; background: var(--panel-2); }
+@media (max-width: 760px) {
+  .dr-grid { grid-template-columns: 1fr; }
+  .dr-fields { grid-template-columns: 1fr 1fr; }
+  .dr-preview { position: static; }
+  .dr-preview textarea { min-height: 50vh; }
+}
+
 /* Quick-add sheet */
 .quick-grid { display: grid; gap: 10px; }
 .quick-grid .btn { padding: 14px; font-size: 15px; }

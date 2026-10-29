@@ -17,6 +17,7 @@ Plain HTML, CSS and JavaScript. There's no build step. Data is stored in **Fireb
 - **Kit & stock**: sell gloves, mouth guards and so on from stock (paid or owed), add stock, and track kit still to hand out.
 - **Expenses & bills**: monthly bills (FEWA, phone, rent…) to tick off, plus expenses paid by cash, petty cash, card or bank.
 - **Class schedule**: the weekly timetable, with today's classes on the dashboard. Edit it in Settings.
+- **Daily report**: one button (Dashboard, Reports or the "+" menu) builds the end-of-day WhatsApp report for any date: enquiries, trial sessions, clients, new admissions, equipment required, payments by bank/card/cash, receipt and payment voucher numbers, expenses, cash balance and the day closing balance. Numbers fill in from the system and can be typed over; saved reports carry the closing balance into the next day.
 - **Trial requests, attendance and reports**: month-by-month income and expenses, a **cash book** with a running balance (like the ACCOUNTS sheet), and cancellation reasons.
 - **Activity log**: every change, with the name of who made it and when. Nobody can edit or delete it.
 - **Phones**: bottom tab bar, a "+" quick-add button, tables shown as cards, and it can be added to the home screen like an app.

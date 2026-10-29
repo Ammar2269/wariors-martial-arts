@@ -18,8 +18,8 @@ const EXP_METHODS = ["Cash", "Petty cash", "Card", "Bank transfer", "Cheque", "O
 const EXP_CATS = ["Rent", "Utilities (electricity & water)", "Internet & phone", "Salaries & coach fees", "Equipment purchase", "Equipment repair & service", "Maintenance", "Transport & fuel", "Office supplies & refreshments", "Cleaning & supplies", "Marketing & ads", "Events & competitions", "Licences & insurance", "Refunds", "Other"];
 const EQ_CATS = ["Kit for sale (stock)", "Mats & flooring", "Gloves & wraps", "Pads & shields", "Bags", "Protective gear", "Weights & strength", "Cardio machines", "EMS equipment", "Yoga & mobility", "Other"];
 const EQ_COND = ["New", "Good", "Worn", "Needs repair", "Retired"];
-const LEAD_STATUS = ["New", "Contacted", "Trial booked", "Attended trial", "Joined", "Not interested", "Old enquiry"];
-const LEAD_OPEN = ["New", "Contacted", "Trial booked", "Attended trial"];
+const LEAD_STATUS = ["New", "Call back", "Contacted", "Trial booked", "Attended trial", "Joined", "Not interested", "Old enquiry"];
+const LEAD_OPEN = ["New", "Call back", "Contacted", "Trial booked", "Attended trial"];
 const LEAD_SOURCES = ["Walk-in", "Phone call", "WhatsApp", "Instagram", "TikTok", "Website", "Referral", "Other"];
 const AGE_GROUPS = ["Adult (18+)", "Teen (13–17)", "Child (under 13)", "Family / more than one person"];
 const TIMES = ["Evening", "Morning", "Weekend", "Any time"];
@@ -49,7 +49,7 @@ const S = {
   user: null,
   settings: structuredClone(DEFAULT_SETTINGS),
   loaded: new Set(),
-  members: [], memberships: [], payments: [], expenses: [], equipment: [], leads: [], handouts: [], attendance: [], activity: [], receipts: [],
+  members: [], memberships: [], payments: [], expenses: [], equipment: [], leads: [], handouts: [], attendance: [], activity: [], receipts: [], dailyReports: [],
   route: "dashboard",
   loginMsg: "",
   ui: {
@@ -292,6 +292,7 @@ function startApp() {
   }, opts, onErr));
   ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts"].forEach(c => sub(c));
   sub("receipts", { orderBy: ["createdAt", "desc"], limit: 400 });
+  sub("dailyReports", { orderBy: ["date", "desc"], limit: 120 });
   sub("attendance", { since: { field: "date", value: U.addDays(U.todayISO(), -120) } });
   sub("activity", { orderBy: ["at", "desc"], limit: 300 });
   unsubs.push(store.subscribeDoc("settings", "main", d => {
@@ -466,7 +467,9 @@ function viewDashboard() {
   const unsent = S.receipts.filter(r => !r.sentAt).length;
   const chart = Array.from({ length: 6 }, (_, i) => { const m = U.addMonths(ym, i - 5); return { label: fmtMonth(m).slice(0, 3), a: incomeIn(m), b: spentIn(m) }; });
 
+  const todayReport = S.dailyReports.find(r => r.id === U.todayISO());
   return `
+    <div class="toolbar"><span class="hint">${todayReport ? `Today's report saved ${U.fmtWhen(todayReport.savedAt)}${todayReport.savedBy ? ` by ${esc(todayReport.savedBy)}` : ""}.` : "Today's report isn't saved yet."}</span><span class="spacer"></span><button class="btn primary" data-act="daily-report">Daily report</button></div>
     <div class="kpis">
       ${kpi(`Collected in ${fmtMonth(ym)}`, money(collected), `${S.payments.filter(p => (p.date || "").startsWith(ym)).length} payments`, "good", "#payments")}
       ${kpi("Owed by members", money(sum(owing, r => r.o.total)), `${owing.length} member${owing.length === 1 ? "" : "s"}`, owing.length ? "bad" : "", "#payments")}
@@ -912,6 +915,13 @@ function viewReports() {
       <select id="rep-year" data-ui="repYear" style="width:auto">${options(years, y)}</select>
       <span class="spacer"></span>
       <button class="btn" data-act="export" data-id="year">Export year summary</button>
+      <button class="btn primary" data-act="daily-report">Daily report</button>
+    </div>
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-head"><h2>Daily reports</h2><span class="hint">The end-of-day reports saved so far. Tap one to open, change or send it again.</span></div>
+      ${S.dailyReports.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Day</th><th class="num">Payments received</th><th class="num">Expenses</th><th class="num">Day closing balance</th><th>Saved by</th></tr></thead><tbody>
+        ${S.dailyReports.slice(0, 31).map(r => `<tr class="clickable" data-act="daily-report" data-id="${esc(r.id)}"><td><b>${fmtDate(r.date)}</b></td><td class="num">${money(r.values?.payTotal || 0)}</td><td class="num">${money(num(r.values?.expenses) + num(r.values?.bankPayments))}</td><td class="num">${money(r.values?.closingBalance || 0)}</td><td>${esc(r.savedBy || "")}<span class="sub">${U.fmtWhen(r.savedAt)}</span></td></tr>`).join("")}
+      </tbody></table></div>` : empty("No daily reports yet. Tap Daily report at the end of the day.")}
     </div>
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-head"><h2>${esc(y)} month by month</h2><span class="hint">Tap a month for its breakdown and cash book below.</span></div>
@@ -1775,6 +1785,171 @@ function openReceipt(id) {
   });
 }
 
+// ---------- Daily report ----------
+// The club's end-of-day WhatsApp report. Numbers fill in from the system for the chosen day; anything can be typed over,
+// and typed values are kept when the report is saved (one report per day, dailyReports/{YYYY-MM-DD}).
+const DAILY = [
+  { keys: [["enqCall", "Enquiry via call"], ["enqWalk", "Enquiry walk in"], ["callBack", "Call back"]] },
+  { title: "Trial session", dash: true, keys: [["trMMA", "MMA"], ["trKick", "Kick boxing"], ["trBoxing", "Boxing"], ["trKalari", "Kalari"], ["trYoga", "Yoga"], ["trBJJ", "BJJ"], ["trOther", "Other", "skip0"]] },
+  { title: "Client", keys: [["clActive", "Active"], ["clInactive", "Inactive"], ["clCancelled", "Cancelled"], ["clFrozen", "Membership frozen"]] },
+  { title: "New admission", bullet: true, keys: [["newKids", "Kids"], ["newAdults", "Adults"]] },
+  { title: "Equipment required", text: true, keys: [["eqGloves", "Gloves"], ["eqMouth", "Mouth guard"], ["eqAp", "AP guard"], ["eqWraps", "Hand wraps"], ["eqShin", "Shin guards"], ["eqKalari", "Kalari"], ["eqTshirt", "T-shirts"], ["eqYoga", "Yoga"], ["eqBjj", "BJJ"]] },
+  { title: "Payment and receipts", bullet: true, money: true, keys: [["payTotal", "Payments received"], ["payBank", "Bank"], ["payCard", "Card"], ["payCash", "Cash"], ["closingReceipt", "Closing receipt no", "text"], ["bankPayments", "Bank payments"], ["expenses", "Expenses"], ["cashBalance", "Cash balance"], ["voucherNos", "Payment voucher no", "text"], ["closingBalance", "Day closing balance"]] }
+];
+const DAILY_KEYS = DAILY.flatMap(s => s.keys.map(k => k[0]));
+// Which equipment line a "kit to hand out" item counts towards.
+const KIT_WORDS = [["eqGloves", /glove/i], ["eqMouth", /mouth/i], ["eqAp", /\bap\b|abdo|groin/i], ["eqWraps", /wrap/i], ["eqShin", /shin/i], ["eqKalari", /kalari/i], ["eqTshirt", /t-?shirt|tee\b/i], ["eqYoga", /yoga|mat\b/i], ["eqBjj", /bjj|\bgi\b/i]];
+const TRIAL_PROGS = [["trMMA", /mma/i], ["trKick", /kick/i], ["trBoxing", /^boxing/i], ["trKalari", /kalari/i], ["trYoga", /yoga/i], ["trBJJ", /bjj|jiu/i]];
+const BANK_METHODS = ["Bank transfer", "Cheque"], CARD_METHODS = ["Card", "Payment link"];
+// A stored date or timestamp as a local YYYY-MM-DD.
+const dayOf = iso => !iso ? "" : iso.length <= 10 ? iso : U.todayISO(new Date(iso));
+const lastNo = list => { const n = list.map(v => String(v || "").trim()).filter(Boolean); return n.sort((a, b) => (Number(a.replace(/\D/g, "")) || 0) - (Number(b.replace(/\D/g, "")) || 0)).pop() || ""; };
+
+// A member's situation on a given day (cancelled / frozen / active / inactive), or null if they hadn't joined yet.
+function clientOn(m, day) {
+  if ((m.joinDate || "") > day) return null;
+  if (m.status === "cancelled" && (!m.cancelDate || m.cancelDate <= day)) return "cancelled";
+  if (m.status === "paused" && (!m.pausedFrom || m.pausedFrom <= day) && (!m.pauseUntil || m.pauseUntil >= day)) return "frozen";
+  const booked = membershipsOf(m.id).some(ms => ms.kind !== "charge" && (!ms.endDate || ms.endDate >= day) && ((ms.startDate || "") <= day || dayOf(ms.createdAt) <= day));
+  return booked ? "active" : "inactive";
+}
+
+function dailyAuto(day) {
+  const v = {};
+  const enq = S.leads.filter(l => dayOf(l.createdAt) === day);
+  v.enqWalk = enq.filter(l => l.source === "Walk-in").length;
+  v.enqCall = enq.length - v.enqWalk;
+  v.callBack = enq.filter(l => ["New", "Call back"].includes(l.status || "New")).length;
+  const trials = S.leads.filter(l => l.trialDate === day);
+  for (const [k, re] of TRIAL_PROGS) v[k] = trials.filter(l => re.test(l.program || "")).length;
+  v.trOther = trials.length - sum(TRIAL_PROGS, ([k]) => v[k]);
+  const states = S.members.map(m => clientOn(m, day));
+  v.clActive = states.filter(s => s === "active").length;
+  v.clInactive = states.filter(s => s === "inactive").length;
+  v.clCancelled = states.filter(s => s === "cancelled").length;
+  v.clFrozen = states.filter(s => s === "frozen").length;
+  const joined = S.members.filter(m => m.joinDate === day);
+  v.newKids = joined.filter(m => m.ageGroup === "Kids").length;
+  v.newAdults = joined.length - v.newKids;
+  // Kit still owed to members on that day.
+  const owed = S.handouts.filter(h => dayOf(h.createdAt) <= day && (!h.done || dayOf(h.doneAt) > day));
+  for (const [k, re] of KIT_WORDS) { const n = owed.filter(h => re.test(h.item || "")).length; v[k] = n ? String(n) : ""; }
+  const ps = S.payments.filter(p => p.date === day);
+  v.payBank = round(sum(ps.filter(p => BANK_METHODS.includes(p.method)), p => p.amount));
+  v.payCard = round(sum(ps.filter(p => CARD_METHODS.includes(p.method)), p => p.amount));
+  v.payCash = round(sum(ps, p => p.amount) - v.payBank - v.payCard);
+  v.closingReceipt = lastNo([...ps.map(p => p.bookNo), ...S.receipts.filter(r => (r.kind || "in") === "in" && r.date === day).map(r => r.number)]);
+  const xs = S.expenses.filter(x => x.status !== "unpaid" && x.date === day);
+  v.bankPayments = round(sum(xs.filter(x => [...BANK_METHODS, "Card"].includes(x.method)), x => x.amount));
+  v.expenses = round(sum(xs, x => x.amount) - v.bankPayments);
+  const vouchers = [...new Set([...xs.map(x => x.voucherNo), ...S.receipts.filter(r => r.kind === "out" && r.date === day).map(r => r.number)].map(n => String(n || "").trim()).filter(Boolean))];
+  v.voucherNos = vouchers.sort((a, b) => (Number(a.replace(/\D/g, "")) || 0) - (Number(b.replace(/\D/g, "")) || 0)).join(", ");
+  // Opening cash = the closing balance of the last saved report before this day.
+  const prev = S.dailyReports.filter(r => r.date < day).sort((a, b) => b.date.localeCompare(a.date))[0];
+  v.openingBalance = prev && prev.values?.closingBalance !== "" && prev.values?.closingBalance != null ? num(prev.values.closingBalance) : "";
+  v.openingFrom = prev ? prev.date : "";
+  return v;
+}
+
+function dailyText(day, v) {
+  const show = (val, s, kind) => {
+    if (val === "" || val == null) return s.text || kind === "text" ? "-" : s.money ? money(0) : "0";
+    return s.money && kind !== "text" ? money(val) : String(val);
+  };
+  const lines = [`*Daily report - Wariors*`, `Date: ${fmtDate(day)} (${new Date(day + "T00:00:00").toLocaleDateString("en-GB", { weekday: "long" })})`];
+  for (const s of DAILY) {
+    lines.push("");
+    if (s.title) lines.push(`*${s.title}*`);
+    for (const [k, label, kind] of s.keys) {
+      if (kind === "skip0" && !num(v[k])) continue;
+      lines.push(`${s.bullet ? "* " : ""}${label}${s.dash ? " - " : ": "}${show(v[k], s, kind)}`);
+    }
+  }
+  lines.push("", `Remarks: ${v.remarks || "-"}`);
+  return lines.join("\n");
+}
+
+function openDailyReport(day0) {
+  const field = (k, label, s, kind) => {
+    const text = s.text || kind === "text";
+    return `<div><label for="dr-${k}">${esc(label)}</label><input id="dr-${k}" name="${k}"${text ? ` maxlength="${kind === "text" ? 80 : 40}" autocomplete="off"` : ' type="number" step="any" inputmode="decimal"'}></div>`;
+  };
+  let saveReport = null;
+  const h = modal({
+    title: "Daily report", wide: true,
+    body: `<div class="dr-grid">
+      <div>
+        <div class="dr-date"><div><label for="dr-date">Report for</label><input id="dr-date" name="date" type="date" value="${esc(day0 || U.todayISO())}" required></div>
+          <button type="button" class="btn small" id="dr-reset">Use system numbers</button></div>
+        <p class="hint" id="dr-status"></p>
+        ${DAILY.map(s => `<fieldset class="dr-sec"><legend>${esc(s.title || "Enquiries")}</legend><div class="dr-fields">
+          ${s.keys.map(([k, label, kind]) => field(k, label, s, kind)).join("")}
+          ${s.money ? `<div><label for="dr-openingBalance">Opening cash (yesterday's closing)</label><input id="dr-openingBalance" name="openingBalance" type="number" step="any" inputmode="decimal"></div>` : ""}
+        </div>${s.money ? `<p class="hint">Bank = bank transfers and cheques. Card includes payment links. Bank payments = expenses paid by bank, card or cheque; Expenses = paid in cash or petty cash. Cash balance = cash received − expenses. Day closing balance = opening cash + cash balance.</p>` : s.text ? `<p class="hint">Filled from kit still to hand out. Type how many are needed (or a size, e.g. "2 × 12 oz").</p>` : ""}</fieldset>`).join("")}
+        <fieldset class="dr-sec"><legend>Remarks</legend><textarea id="dr-remarks" name="remarks" maxlength="600" placeholder="e.g. Need equipment ASAP"></textarea></fieldset>
+      </div>
+      <div class="dr-preview"><label for="dr-text">The report</label><textarea id="dr-text" readonly></textarea></div>
+    </div>`,
+    footer: `<footer><button type="button" class="btn left" id="dr-copy">Copy</button><button type="button" class="btn wa" id="dr-wa">Send on WhatsApp</button><button class="btn primary" type="submit">Save</button></footer>`,
+    onOpen(el) {
+      const f = el.querySelector("form");
+      const preview = el.querySelector("#dr-text");
+      let edited = new Set();
+      const values = () => { const o = {}; for (const k of [...DAILY_KEYS, "openingBalance", "remarks"]) o[k] = f[k].value.trim() === "" ? "" : f[k].type === "number" ? num(f[k].value) : f[k].value.trim(); return o; };
+      const derive = () => {
+        const n = k => num(f[k].value);
+        if (!edited.has("payTotal")) f.payTotal.value = round(n("payBank") + n("payCard") + n("payCash"));
+        if (!edited.has("cashBalance")) f.cashBalance.value = round(n("payCash") - n("expenses"));
+        if (!edited.has("closingBalance")) f.closingBalance.value = round(n("openingBalance") + n("cashBalance"));
+        preview.value = dailyText(f.date.value, values());
+      };
+      const load = keepTyped => {
+        const day = f.date.value || U.todayISO();
+        const saved = S.dailyReports.find(r => r.id === day);
+        const auto = dailyAuto(day);
+        if (!keepTyped) edited = new Set(saved?.edited || []);
+        for (const k of [...DAILY_KEYS, "openingBalance"]) f[k].value = edited.has(k) ? saved?.values?.[k] ?? "" : auto[k] ?? "";
+        if (!keepTyped) f.remarks.value = saved?.values?.remarks ?? "";
+        el.querySelector("#dr-status").innerHTML = `${saved ? `Saved ${U.fmtWhen(saved.savedAt)}${saved.savedBy ? ` by ${esc(saved.savedBy)}` : ""}. Numbers you typed are kept; the rest update from the system.` : "Not saved yet."}${auto.openingFrom ? ` Opening cash is the closing balance of ${fmtDate(auto.openingFrom)}.` : " No earlier report saved, so type the opening cash once."}`;
+        derive();
+      };
+      f.addEventListener("input", e => { const k = e.target.name; if (k && k !== "date") { edited.add(k); derive(); } });
+      f.date.addEventListener("change", () => load(false));
+      el.querySelector("#dr-reset").addEventListener("click", () => {
+        // Keep what can only be typed (equipment, opening cash, remarks); everything else back to the system's numbers.
+        edited = new Set([...edited].filter(k => k.startsWith("eq") || k === "openingBalance"));
+        load(true);
+        U.toast("Numbers refreshed from the system");
+      });
+      const save = async quiet => {
+        const day = f.date.value;
+        const v = values();
+        await store.set("dailyReports", day, { date: day, values: v, edited: [...edited], text: dailyText(day, v), savedAt: U.nowISO(), savedBy: who() });
+        await log(`Saved the daily report for ${fmtDate(day)}: payments ${money(v.payTotal || 0)}, closing balance ${money(v.closingBalance || 0)}`);
+        if (!quiet) U.toast("Daily report saved");
+      };
+      saveReport = save;
+      el.querySelector("#dr-copy").addEventListener("click", () => {
+        derive();
+        (navigator.clipboard ? navigator.clipboard.writeText(preview.value) : Promise.reject())
+          .then(() => U.toast("Report copied. Paste it in WhatsApp."), () => { preview.select(); U.toast("Select all and copy the report text.", "error"); });
+        save(true).catch(err => U.toast(err.message || String(err), "error"));
+      });
+      el.querySelector("#dr-wa").addEventListener("click", () => {
+        derive();
+        window.open(`https://wa.me/?text=${encodeURIComponent(preview.value)}`, "_blank", "noopener");
+        save(true).catch(err => U.toast(err.message || String(err), "error"));
+      });
+      load(false);
+    },
+    async onSubmit() {
+      if (!h.el.querySelector("form").date.value) { U.toast("Choose the date.", "error"); return false; }
+      await saveReport(false);
+      return false; // keep it open so it can still be sent
+    }
+  });
+}
+
 // ---------- Receipt photos ----------
 // There's no file storage on the free Firebase plan, so photos are shrunk in the browser and saved in the database:
 // receipts/{id} holds the details plus a small preview, receiptImages/{id} the full photo (a document holds up to 1 MB).
@@ -2343,6 +2518,7 @@ const ACTIONS = {
   receipt: id => openReceipt(id),
   print() { document.body.classList.add("printing"); window.print(); setTimeout(() => document.body.classList.remove("printing"), 300); },
   "edit-payment": id => openEditPayment(id),
+  "daily-report": day => openDailyReport(day),
   async "del-payment"(id) {
     const p = S.payments.find(x => x.id === id);
     if (!(await U.confirmBox(`Delete the payment of ${money(p.amount)} from ${esc(p.memberName || p.payerName)} on ${fmtDate(p.date)}? It stays in the activity log.`, { danger: true, okLabel: "Delete payment" }))) return;
@@ -2488,6 +2664,7 @@ const ACTIONS = {
       title: "Quick add",
       body: `<div class="quick-grid">
         <button type="button" class="btn primary" data-act="new-membership">New membership / renewal</button>
+        <button type="button" class="btn" data-act="daily-report">Daily report</button>
         <button type="button" class="btn" data-act="new-payment">Record payment</button>
         <button type="button" class="btn" data-act="rc-add">Add receipt photos</button>
         <button type="button" class="btn" data-act="new-charge">Kit sale or other charge</button>
