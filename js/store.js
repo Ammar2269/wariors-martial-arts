@@ -5,7 +5,7 @@ import { firebaseConfig } from "./firebase-config.js";
 
 export const MODE = firebaseConfig && firebaseConfig.apiKey ? "firebase" : "demo";
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
-export const COLLECTIONS = ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts", "attendance", "activity", "receipts", "dailyReports"];
+export const COLLECTIONS = ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts", "attendance", "activity", "receipts", "dailyReports", "journal", "monthEnds"];
 // Full-size receipt photos, one document per receipt (same id as in "receipts"). Kept out of normal backups because of their size.
 export const PHOTOS = "receiptImages";
 

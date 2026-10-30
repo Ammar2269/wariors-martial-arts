@@ -1,8 +1,9 @@
 // Wariors admin dashboard: members, memberships & renewals, payments, receipt photos, expenses & bills, class schedule,
-// equipment & stock, trial requests, attendance, reports and an automatic activity log.
+// equipment & stock, trial requests, attendance, reports, accounts (P&L, balance sheet, petty cash) and an automatic activity log.
 // Data lives in Firestore (or localStorage in demo mode).
 import { store, MODE, COLLECTIONS, PHOTOS } from "./store.js";
 import * as U from "./util.js";
+import { buildXlsx, tableSheet, cellRef, XLSX_TYPE } from "./xlsx.js";
 
 const { esc, sum, fmtDate, fmtMonth, options } = U;
 const modal = U.modal;
@@ -37,6 +38,8 @@ const DEFAULT_SETTINGS = {
   cancelText: "Hi {name}, this is {club}. Your membership ended on {date} and we have it as cancelled. Could you let us know if you want to cancel for sure, or would you like to renew? Just reply CANCEL or RENEW. We'd love to have you back on the mat!",
   accountantName: "Accountant group",
   accountantLink: "",
+  staff: [],
+  books: {},
   plans: [],
   extraFees: [],
   schedule: [],
@@ -49,7 +52,7 @@ const S = {
   user: null,
   settings: structuredClone(DEFAULT_SETTINGS),
   loaded: new Set(),
-  members: [], memberships: [], payments: [], expenses: [], equipment: [], leads: [], handouts: [], attendance: [], activity: [], receipts: [], dailyReports: [],
+  members: [], memberships: [], payments: [], expenses: [], equipment: [], leads: [], handouts: [], attendance: [], activity: [], receipts: [], dailyReports: [], journal: [], monthEnds: [],
   route: "dashboard",
   loginMsg: "",
   ui: {
@@ -62,6 +65,7 @@ const S = {
     attDate: U.todayISO(),
     schedDay: todayDay(),
     repYear: U.todayISO().slice(0, 4), repMonth: U.thisMonth(), cashMethod: "",
+    accMonth: U.thisMonth(), accTab: "summary", accPocket: "",
     actQ: "",
     draft: null
   }
@@ -290,7 +294,7 @@ function startApp() {
     S.loaded.add(col);
     scheduleRender();
   }, opts, onErr));
-  ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts"].forEach(c => sub(c));
+  ["members", "memberships", "payments", "expenses", "equipment", "leads", "handouts", "journal", "monthEnds"].forEach(c => sub(c));
   sub("receipts", { orderBy: ["createdAt", "desc"], limit: 400 });
   sub("dailyReports", { orderBy: ["date", "desc"], limit: 120 });
   sub("attendance", { since: { field: "date", value: U.addDays(U.todayISO(), -120) } });
@@ -317,6 +321,7 @@ const ICONS = {
   leads: "M22 12h-6l-2 3h-4l-2-3H2M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z",
   attendance: "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11",
   reports: "M18 20V10M12 20V4M6 20v-6",
+  accounts: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5M9 7h7M9 11h5",
   activity: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2",
   settings: "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6",
   more: "M4 6h16M4 12h16M4 18h16"
@@ -324,7 +329,7 @@ const ICONS = {
 const ROUTES = [
   ["dashboard", "Dashboard"], ["members", "Members"], ["payments", "Payments & renewals"], ["receipts", "Receipts & vouchers"], ["expenses", "Expenses & bills"],
   ["schedule", "Class schedule"], ["equipment", "Equipment & stock"], ["leads", "Trial requests"], ["attendance", "Attendance"],
-  ["reports", "Reports & cash book"], ["activity", "Activity log"], ["settings", "Settings"]
+  ["reports", "Reports & cash book"], ["accounts", "Accounts"], ["activity", "Activity log"], ["settings", "Settings"]
 ];
 const BOTTOM = [["dashboard", "Home"], ["members", "Members"], ["payments", "Payments"], ["schedule", "Schedule"]];
 
@@ -465,6 +470,8 @@ function viewDashboard() {
   const pauseEnded = S.members.filter(m => m.status === "paused" && m.pauseUntil && m.pauseUntil < U.todayISO());
   const toAsk = notAskedYet().length;
   const unsent = S.receipts.filter(r => !r.sentAt).length;
+  const lastMonth = U.addMonths(ym, -1);
+  const accDue = Number(U.todayISO().slice(8)) <= 10 && !S.monthEnds.some(m => m.id === lastMonth && m.givenAt);
   const chart = Array.from({ length: 6 }, (_, i) => { const m = U.addMonths(ym, i - 5); return { label: fmtMonth(m).slice(0, 3), a: incomeIn(m), b: spentIn(m) }; });
 
   const todayReport = S.dailyReports.find(r => r.id === U.todayISO());
@@ -501,7 +508,8 @@ function viewDashboard() {
             ${unpaidInv.map(x => `<li><div class="grow">${esc(x.description || x.category)}<span class="sub">${esc(x.vendor || "")} · due ${fmtDate(x.dueDate)}</span></div><b>${money(x.amount)}</b><button class="btn small" data-act="pay-expense" data-id="${esc(x.id)}">Pay</button></li>`).join("")}</ul>`
             : (S.settings.bills || []).length ? empty("All bills for this month are paid.") : empty(`No monthly bills set up yet. <a href="#settings">Add rent, utilities…</a>`)}
         </div>
-        ${eq.length || pauseEnded.length || outOfStock.length || newLeads || toAsk || unsent ? `<div class="panel"><div class="panel-head"><h2>Needs attention</h2></div><ul class="list">
+        ${eq.length || pauseEnded.length || outOfStock.length || newLeads || toAsk || unsent || accDue ? `<div class="panel"><div class="panel-head"><h2>Needs attention</h2></div><ul class="list">
+          ${accDue ? `<li><div class="grow">${fmtMonth(lastMonth)} accounts<span class="sub">not given to the manager yet</span></div><a class="btn small" href="#accounts" data-act="acc-month-end" data-id="${lastMonth}">Open</a></li>` : ""}
           ${unsent ? `<li><div class="grow">${unsent} receipt photo${unsent === 1 ? "" : "s"}<span class="sub">not sent to the accountant yet</span></div><a class="btn small" href="#receipts" data-act="ui" data-id="rcFilter=unsent">Send</a></li>` : ""}
           ${newLeads ? `<li><div class="grow">${newLeads} new trial request${newLeads === 1 ? "" : "s"}<span class="sub">not contacted yet</span></div><a class="btn small" href="#leads">Open</a></li>` : ""}
           ${toAsk ? `<li><div class="grow">${toAsk} cancelled member${toAsk === 1 ? "" : "s"}<span class="sub">not asked yet if they want to renew</span></div><a class="btn small" href="#members" data-act="ui" data-id="mfilter=cancelled">Open</a></li>` : ""}
@@ -1000,6 +1008,9 @@ function viewSettings() {
       <div class="panel"><div class="panel-head"><h2>Monthly bills</h2><span class="hint">Rent, electricity & water, phone, salaries… They appear every month under Expenses so nothing is forgotten.</span></div>
         ${rowsEditor("bills", [{ key: "name", label: "Bill name", w: "2fr" }, { key: "category", label: "Category", type: "select", options: EXP_CATS, w: "1.6fr" }, { key: "amount", label: "Usual amount", type: "number" }, { key: "dueDay", label: "Due day", type: "number" }], d.bills || [], "+ Add bill")}</div>
 
+      <div class="panel"><div class="panel-head"><h2>Staff & salaries</h2><span class="hint">Coaches and staff with their monthly salary. Accounts → Salaries shows who has been paid each month.</span></div>
+        ${rowsEditor("staff", [{ key: "name", label: "Name", w: "2fr" }, { key: "role", label: "Role (coach, reception…)", w: "1.6fr" }, { key: "salary", label: "Monthly salary", type: "number" }], d.staff || [], "+ Add staff")}</div>
+
       <div class="panel"><div class="panel-head"><h2>Class schedule</h2><span class="hint">Times use the 24-hour clock (17:00 = 5 PM).</span></div>
         ${rowsEditor("schedule", [{ key: "day", label: "Day", type: "select", options: DAYS.map(x => x[0]) }, { key: "from", label: "From", type: "time" }, { key: "to", label: "To", type: "time" }, { key: "class", label: "Class", w: "2fr" }, { key: "group", label: "Group", type: "select", options: GROUPS }], d.schedule || [], "+ Add class")}</div>
 
@@ -1024,7 +1035,586 @@ function viewSettings() {
     </div>`;
 }
 
-const VIEWS = { dashboard: viewDashboard, members: viewMembers, payments: viewPayments, receipts: viewReceipts, expenses: viewExpenses, schedule: viewSchedule, equipment: viewEquipment, leads: viewLeads, attendance: viewAttendance, reports: viewReports, activity: viewActivity, settings: viewSettings };
+// ---------- Accounts ----------
+// The books for the accountant and the manager, worked out from the payments, expenses and the entries made here.
+// Cash basis (allowed for small UAE businesses): income counts on the day the money comes in, costs on the day they're paid.
+// Each record becomes a double entry (one account up, another down), so the balance sheet always balances.
+// Anything dated before the starting balances is left out of the balances: it's already in those amounts.
+const BOOKS = [
+  ["bank", "Main account – bank", "asset"], ["cash", "Main account – cash in hand", "asset"], ["petty", "Petty cash", "asset"],
+  ["assets", "Equipment & other assets", "asset"], ["loans", "Loans & money the club owes", "liability"],
+  ["capital", "Owner's capital", "equity"], ["drawings", "Owner's drawings", "equity"]
+];
+const MONEY = ["bank", "cash", "petty"];
+const bookName = k => (BOOKS.find(b => b[0] === k) || [k, k])[1];
+// Card machines, payment links, transfers and cheques all end up in the bank.
+const IN_ACCT = { Cash: "cash", Card: "bank", "Bank transfer": "bank", "Payment link": "bank", Cheque: "bank" };
+const OUT_ACCT = { Cash: "cash", "Petty cash": "petty", Card: "bank", "Bank transfer": "bank", Cheque: "bank" };
+const INCOME_LINES = { Membership: "Membership fees", "Registration fee": "Registration & admission fees", "Uniform & gear sale": "Kit & uniform sales", "Personal training": "Personal training", "Grading / belt test": "Grading & belt tests", "Event / competition": "Events & competitions", "Other income": "Other income" };
+const INCOME_ORDER = Object.values(INCOME_LINES);
+const KIT_LINE = "Kit & uniform sales", REFUNDS_LINE = "Less: refunds", SALARY_CAT = "Salaries & coach fees";
+// [title, hint, From choices, To choices, default From, default To]
+const ENTRY_KINDS = {
+  transfer: ["Transfer money", "Main account to petty cash, petty cash back to the main account, or cash paid into the bank.", MONEY, MONEY, "cash", "petty"],
+  ownerIn: ["Money in from the owner or a loan", "Money the owner added to the club, or a loan received.", ["capital", "loans"], MONEY, "capital", "bank"],
+  ownerOut: ["Money out to the owner or a loan repaid", "Money the owner took for themselves (not a club cost), or a loan paid back.", MONEY, ["drawings", "loans"], "bank", "drawings"],
+  other: ["Other entry (for the accountant)", "The amount moves from the first account to the second: To is debited, From is credited.", BOOKS.map(b => b[0]), BOOKS.map(b => b[0]), "bank", "assets"]
+};
+const ACC_TABS = [["summary", "Summary"], ["pl", "Profit & loss"], ["main", "Main account"], ["petty", "Petty cash"], ["bs", "Balance sheet"], ["salaries", "Salaries"], ["close", "Month end"]];
+const lastDay = ym => `${ym}-${U.pad(U.daysInMonth(ym))}`;
+const booksStart = () => S.settings.books?.start || "";
+const staffList = () => (S.settings.staff || []).filter(s => String(s.name || "").trim());
+const byDate = (a, b) => (a.date || "").localeCompare(b.date || "");
+
+// Every double entry, oldest first: { date, dr, cr, amount, text, sub, ref, method, src, id }.
+// dr/cr are BOOKS keys, "in:<income line>", "ex:<expense category>" or "open" (the other side of the starting balances).
+let booksMemo = null;
+function bookEntries() {
+  const deps = [S.payments, S.expenses, S.journal, S.memberships, S.settings];
+  if (booksMemo && booksMemo.deps.every((d, i) => d === deps[i])) return booksMemo.list;
+  const list = [], b = S.settings.books || {};
+  if (b.start) for (const [k, , type] of BOOKS) {
+    const v = round(num(b.opening?.[k]));
+    if (v) list.push({ date: b.start, dr: type === "asset" ? k : "open", cr: type === "asset" ? "open" : k, amount: v, text: "Starting balance", sub: bookName(k), src: "start", id: k });
+  }
+  for (const p of S.payments) {
+    const amt = round(num(p.amount));
+    if (!amt || !p.date) continue;
+    const ms = p.membershipId ? membershipById(p.membershipId) : null;
+    // Kit sold with a membership counts as kit sales, in proportion to the membership's kit price.
+    const kit = ms && ms.kind !== "charge" && num(ms.kitAmount) > 0 && totalOf(ms) > 0 ? round(amt * num(ms.kitAmount) / totalOf(ms)) : 0;
+    const e = { date: p.date.slice(0, 10), dr: IN_ACCT[p.method] || "cash", text: p.memberName || p.payerName || "—", sub: p.type || "Membership", ref: p.bookNo || p.receipt || "", method: p.method || "", src: "payment", id: p.id };
+    if (kit) list.push({ ...e, cr: "in:" + KIT_LINE, amount: kit });
+    if (round(amt - kit)) list.push({ ...e, cr: "in:" + (INCOME_LINES[p.type || "Membership"] || p.type), amount: round(amt - kit) });
+  }
+  for (const x of S.expenses) {
+    const amt = round(num(x.amount));
+    if (x.status === "unpaid" || !amt || !x.date) continue;
+    const cat = x.category || "Other";
+    list.push({ date: x.date.slice(0, 10), dr: cat === "Refunds" ? "in:" + REFUNDS_LINE : "ex:" + cat, cr: OUT_ACCT[x.method] || "cash", amount: amt, text: x.description || cat, sub: cat, ref: x.voucherNo || x.ref || "", method: x.method || "", src: "expense", id: x.id });
+  }
+  for (const j of S.journal) {
+    const amt = round(num(j.amount));
+    if (!amt || !j.date || !j.from || !j.to || j.from === j.to) continue;
+    list.push({ date: j.date, dr: j.to, cr: j.from, amount: amt, text: j.note || ENTRY_KINDS[j.kind]?.[0] || "Entry", sub: `${bookName(j.from)} → ${bookName(j.to)}`, ref: j.ref || "", src: "journal", id: j.id });
+  }
+  list.sort((a, b) => a.date.localeCompare(b.date));
+  booksMemo = { deps, list };
+  return list;
+}
+
+// Debit balance at the end of a day: for the money accounts, what's in them.
+function balanceAt(acct, day) {
+  const start = booksStart();
+  let t = 0;
+  for (const e of bookEntries()) {
+    if (e.date > day) break;
+    if (e.date < start) continue;
+    if (e.dr === acct) t += e.amount;
+    if (e.cr === acct) t -= e.amount;
+  }
+  return round(t);
+}
+
+// Income and costs between two days, both included.
+function profitLoss(from, to) {
+  const inc = {}, cost = {};
+  for (const e of bookEntries()) {
+    if (e.date < from) continue;
+    if (e.date > to) break;
+    for (const [k, sign] of [[e.dr, 1], [e.cr, -1]]) {
+      if (k.startsWith("in:")) inc[k.slice(3)] = round((inc[k.slice(3)] || 0) - sign * e.amount);
+      else if (k.startsWith("ex:")) cost[k.slice(3)] = round((cost[k.slice(3)] || 0) + sign * e.amount);
+    }
+  }
+  const income = round(sum(Object.values(inc), v => v)), costs = round(sum(Object.values(cost), v => v));
+  return { inc, cost, income, costs, net: round(income - costs) };
+}
+function lineNames(pls, key, order) {
+  const at = n => n === REFUNDS_LINE ? 1e4 : (order.indexOf(n) + 1 || 999);
+  return [...new Set(pls.flatMap(p => Object.keys(p[key]).filter(n => p[key][n])))].sort((a, b) => at(a) - at(b) || a.localeCompare(b));
+}
+
+function balanceSheet(day) {
+  const start = booksStart(), y0 = day.slice(0, 4) + "-01-01";
+  const side = type => BOOKS.filter(b => b[2] === type).map(([k, n]) => [n, (type === "asset" ? 1 : -1) * balanceAt(k, day)]);
+  const assets = side("asset"), liabilities = side("liability");
+  const equity = [["Starting balance (owner's equity)", -balanceAt("open", day)], ...side("equity"),
+    ["Profit kept from earlier years", start < y0 ? profitLoss(start, U.addDays(y0, -1)).net : 0], [start > y0 ? `Profit since the accounts started (${fmtDate(start)})` : "Profit this year", profitLoss(start > y0 ? start : y0, day).net]];
+  const t = rows => round(sum(rows, r => r[1]));
+  return { day, assets, liabilities, equity, totalAssets: t(assets), totalLiab: t(liabilities), totalEquity: t(equity), diff: round(t(assets) - t(liabilities) - t(equity)) };
+}
+
+// Money accounts for a month: the opening balance, each amount in or out, and the running balance.
+// Money moved between two of the chosen accounts (cash paid into the bank, inside the main account) is left out.
+function statement(accts, ym) {
+  const from = ym + "-01", to = lastDay(ym), start = booksStart();
+  const opening = round(sum(accts, a => balanceAt(a, U.addDays(from, -1))));
+  const rows = [];
+  for (const e of bookEntries()) {
+    if (e.date < from || e.date < start) continue;
+    if (e.date > to) break;
+    const d = round((accts.includes(e.dr) ? e.amount : 0) - (accts.includes(e.cr) ? e.amount : 0));
+    if (!d) continue;
+    const prev = rows.at(-1);
+    if (prev && e.src === "payment" && prev.src === "payment" && prev.id === e.id) { prev.delta = round(prev.delta + d); continue; }
+    rows.push({ ...e, acct: accts.includes(e.dr) ? e.dr : e.cr, delta: d });
+  }
+  let bal = opening;
+  rows.forEach(r => { bal = round(bal + r.delta); r.bal = bal; });
+  return { opening, rows, closing: bal, ins: round(sum(rows, r => Math.max(0, r.delta))), outs: round(sum(rows, r => Math.max(0, -r.delta))) };
+}
+
+// Salaries paid for a month, per person on the staff list. Older entries without a staff name are matched by name.
+function staffMatch(x, s) {
+  if (x.staff) return x.staff === s.name;
+  const f = firstName(s.name).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (x.vendor || "").toLowerCase() === s.name.toLowerCase() || (f.length > 2 && new RegExp(`\\b${f}\\b`, "i").test(`${x.vendor || ""} ${x.description || ""}`));
+}
+function payroll(ym) {
+  const paid = S.expenses.filter(x => x.category === SALARY_CAT && x.status !== "unpaid" && (x.salaryMonth || (x.date || "").slice(0, 7)) === ym).sort(byDate);
+  const used = new Set();
+  const rows = staffList().map(s => {
+    const list = paid.filter(x => !used.has(x.id) && staffMatch(x, s));
+    list.forEach(x => used.add(x.id));
+    const done = round(sum(list, x => x.amount));
+    return { s, list, paid: done, left: Math.max(0, round(num(s.salary) - done)) };
+  });
+  return { rows, other: paid.filter(x => !used.has(x.id)) };
+}
+
+// Things a cash-basis balance sheet leaves out, as of today.
+function memoItems() {
+  const owed = owingList(), unpaid = S.expenses.filter(x => x.status === "unpaid"), stock = S.equipment.filter(e => e.forSale && num(e.qty) > 0);
+  return [
+    ["Money owed by members", round(sum(owed, r => r.o.total)), `${owed.length} member${owed.length === 1 ? "" : "s"}`],
+    ["Unpaid bills & invoices", round(sum(unpaid, x => x.amount)), `${unpaid.length} bill${unpaid.length === 1 ? "" : "s"}`],
+    ["Kit in stock (at cost price)", round(sum(stock, e => num(e.qty) * num(e.unitCost))), stock.some(e => !num(e.unitCost)) ? "Some items have no cost price" : `${sum(stock, e => num(e.qty))} items`]
+  ];
+}
+
+// [done (true/false, null = just information), what, detail]
+function monthChecks(ym) {
+  const from = ym + "-01", to = lastDay(ym), today = U.todayISO();
+  const inMonth = d => (d || "").slice(0, 10) >= from && (d || "").slice(0, 10) <= to;
+  const noMethod = S.payments.filter(p => inMonth(p.date) && !IN_ACCT[p.method]).length + S.expenses.filter(x => x.status !== "unpaid" && inMonth(x.date) && !OUT_ACCT[x.method]).length;
+  const unpaid = S.expenses.filter(x => x.status === "unpaid" && (x.dueDate || x.date || "") <= to);
+  const left = payroll(ym).rows.filter(r => r.left > 0);
+  const unsent = S.receipts.filter(r => !r.sentAt && inMonth(r.date)).length;
+  const days = to < today ? U.daysInMonth(ym) : from > today ? 0 : U.diffDays(from, today) + 1;
+  const reports = S.dailyReports.filter(r => inMonth(r.date || r.id)).length;
+  const me = S.monthEnds.find(m => m.id === ym);
+  const counted = MONEY.filter(a => me?.counts?.[a] !== undefined && me.counts[a] !== "");
+  const off = counted.filter(a => Math.abs(num(me.counts[a]) - balanceAt(a, to)) >= 0.01);
+  const diff = balanceSheet(to).diff;
+  return [
+    [!!booksStart(), "Starting balances set", booksStart() ? `Accounts start on ${fmtDate(booksStart())}` : "Set them so the balances match the bank and the cash"],
+    [!noMethod, "Every payment has a payment method", noMethod ? `${noMethod} without one (counted as cash)` : ""],
+    [!unpaid.length, "Bills paid", unpaid.length ? `${unpaid.length} unpaid: ${money(sum(unpaid, x => x.amount))}` : ""],
+    [!left.length, "Salaries paid", left.length ? `${left.length} still to pay: ${money(sum(left, r => r.left))}` : staffList().length ? "" : "No staff list yet (Settings)"],
+    [!unsent, "Receipt photos sent to the accountant", unsent ? `${unsent} not sent yet` : ""],
+    [null, "Daily reports saved", `${reports} of ${days} day${days === 1 ? "" : "s"}`],
+    [counted.length === MONEY.length && !off.length, "Bank, cash and petty cash checked", counted.length < MONEY.length ? `${MONEY.length - counted.length} of ${MONEY.length} not checked yet` : off.length ? `Difference in ${off.map(bookName).join(", ")}` : "All match"],
+    [Math.abs(diff) < 0.01, "Balance sheet balances", Math.abs(diff) < 0.01 ? "" : `Out by ${money(diff)}`]
+  ];
+}
+
+// Saves a few settings without touching the rest (the Settings page saves the whole document).
+async function patchSettings(patch) {
+  const { id, ...cur } = S.settings;
+  await store.set("settings", "main", { ...cur, ...patch });
+}
+
+// ---------- Accounts: page ----------
+const amt = v => { v = round(v); return `<span${v < 0 ? ' class="neg"' : ""}>${v < 0 ? "−" : ""}${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>`; };
+// Statement tables (P&L, balance sheet) stay tables on phones; the numbers leave out the currency, which is in the corner.
+function finTable(heads, rows) {
+  return `<div class="table-wrap"><table class="fin"><thead><tr><th>${esc(S.settings.currency || "AED")}</th>${heads.map(h => `<th class="num">${esc(h)}</th>`).join("")}</tr></thead><tbody>
+    ${rows.map(r => r.sec ? `<tr class="sec"><td colspan="${heads.length + 1}">${esc(r.sec)}</td></tr>`
+      : `<tr class="${r.cls || ""}"><td>${esc(r.label)}${r.sub ? `<span class="sub">${esc(r.sub)}</span>` : ""}</td>${r.values.map(v => `<td class="num">${amt(v)}</td>`).join("")}</tr>`).join("")}
+  </tbody></table></div>`;
+}
+function plRows(pls) {
+  return [
+    { sec: "Income" }, ...lineNames(pls, "inc", INCOME_ORDER).map(n => ({ label: n, values: pls.map(p => p.inc[n] || 0) })),
+    { label: "Total income", cls: "total", values: pls.map(p => p.income) },
+    { sec: "Costs" }, ...lineNames(pls, "cost", EXP_CATS).map(n => ({ label: n, values: pls.map(p => p.cost[n] || 0) })),
+    { label: "Total costs", cls: "total", values: pls.map(p => p.costs) },
+    { label: "Net profit (loss)", cls: "grand", values: pls.map(p => p.net) }
+  ];
+}
+function bsRows(bss) {
+  const part = (key, title, total, label) => [{ sec: title }, ...bss[0][key].map((r, i) => ({ label: r[0], values: bss.map(b => b[key][i][1]) })), { label, cls: "total", values: bss.map(b => b[total]) }];
+  return [...part("assets", "What the club has (assets)", "totalAssets", "Total assets"), ...part("liabilities", "What the club owes (liabilities)", "totalLiab", "Total liabilities"),
+    ...part("equity", "Owner's equity", "totalEquity", "Total equity"), { label: "Liabilities + equity", cls: "grand", values: bss.map(b => round(b.totalLiab + b.totalEquity)) }];
+}
+function cashRows(ym) {
+  const rows = MONEY.map(a => { const st = statement([a], ym); return { label: bookName(a), values: [st.opening, st.ins, st.outs, st.closing] }; });
+  return [...rows, { label: "Total", cls: "total", values: [0, 1, 2, 3].map(i => round(sum(rows, r => r.values[i]))) }];
+}
+function statementTable(st, showAcct) {
+  const open = r => r.src === "payment" ? `data-act="edit-payment" data-id="${esc(r.id)}"` : r.src === "expense" ? `data-act="edit-expense" data-id="${esc(r.id)}"` : r.src === "journal" ? `data-act="edit-entry" data-id="${esc(r.id)}"` : `data-act="acc-start"`;
+  const span = showAcct ? 6 : 5;
+  return `<div class="table-wrap"><table class="t stmt"><thead><tr><th>Particulars</th><th>Date</th>${showAcct ? "<th>Account</th>" : ""}<th>Ref. / voucher</th><th class="num">In</th><th class="num">Out</th><th class="num">Balance</th></tr></thead><tbody>
+    <tr><td colspan="${span}"><b>Balance at the start of the month</b></td><td class="num"><b>${money(st.opening)}</b></td></tr>
+    ${st.rows.map(r => `<tr class="clickable" ${open(r)}><td><b>${esc(r.text)}</b><span class="sub">${esc([r.sub, r.method].filter(Boolean).join(" · "))}</span></td><td>${fmtDate(r.date)}</td>${showAcct ? `<td>${esc(bookName(r.acct).replace("Main account – ", ""))}</td>` : ""}<td>${esc(r.ref || "")}</td>
+      <td class="num">${r.delta > 0 ? money(r.delta) : ""}</td><td class="num">${r.delta < 0 ? money(-r.delta) : ""}</td><td class="num">${money(r.bal)}</td></tr>`).join("")}
+  </tbody><tfoot><tr><td colspan="${span - 2}">Balance at the end of the month</td><td class="num">${money(st.ins)}</td><td class="num">${money(st.outs)}</td><td class="num">${money(st.closing)}</td></tr></tfoot></table></div>`;
+}
+const memoList = () => `<ul class="list">${memoItems().map(([l, v, s]) => `<li><div class="grow">${esc(l)}<span class="sub">${esc(s)}</span></div><b>${money(v)}</b></li>`).join("")}</ul>`;
+
+function viewAccounts() {
+  const ym = S.ui.accMonth, end = lastDay(ym), start = booksStart();
+  const pl = profitLoss(ym + "-01", end);
+  const bal = k => balanceAt(k, end);
+  const tab = { summary: accSummary, pl: accPL, main: accMain, petty: accPetty, bs: accBS, salaries: accSalaries, close: accClose }[S.ui.accTab] || accSummary;
+  return `
+    <div class="toolbar">
+      <button class="btn" data-act="ui" data-id="accMonth=${U.addMonths(ym, -1)}" aria-label="Previous month">‹</button>
+      <input type="month" id="acc-month" value="${ym}" data-ui="accMonth" aria-label="Month">
+      <button class="btn" data-act="ui" data-id="accMonth=${U.addMonths(ym, 1)}" aria-label="Next month">›</button>
+      <span class="spacer"></span>
+      <button class="btn" data-act="acc-new" data-id="transfer">Transfer money</button>
+      <button class="btn" data-act="acc-entry">+ Add entry</button>
+      <button class="btn" data-act="acc-print">Print / PDF</button>
+      <button class="btn primary" data-act="acc-excel">Download Excel</button>
+    </div>
+    ${start ? "" : `<div class="callout warn"><b>Set the starting balances first.</b> Enter how much was in the bank, the cash drawer and the petty cash box on the day these accounts start, so the balances match real life. <button class="btn small" data-act="acc-start">Starting balances</button></div>`}
+    ${start && end < start ? `<div class="callout info">This month is before the accounts start (${fmtDate(start)}), so the balances show 0. Income and costs still show.</div>` : ""}
+    <div class="kpis">
+      ${kpi(`Income in ${fmtMonth(ym)}`, money(pl.income))}
+      ${kpi("Costs", money(pl.costs), pl.cost[SALARY_CAT] ? `Salaries ${money(pl.cost[SALARY_CAT])}` : "")}
+      ${kpi("Net profit", money(pl.net), pl.income ? `${Math.round(pl.net / pl.income * 100)}% of income` : "", pl.net < 0 ? "bad" : "")}
+      ${kpi("Main account", money(bal("bank") + bal("cash")), `Bank ${money(bal("bank"))} · cash ${money(bal("cash"))}`, bal("cash") < 0 || bal("bank") < 0 ? "warn" : "")}
+      ${kpi("Petty cash", money(bal("petty")), end > U.todayISO() ? "so far this month" : `on ${fmtDate(end)}`, bal("petty") < 0 ? "bad" : "")}
+    </div>
+    <div class="seg acc-tabs">${ACC_TABS.map(([k, l]) => seg("accTab", k, l)).join("")}</div>
+    ${tab(ym)}`;
+}
+
+function accSummary(ym) {
+  const entries = S.journal.filter(j => (j.date || "").startsWith(ym)).sort(byDate);
+  return `<div class="cols-2">
+    <div class="panel"><div class="panel-head"><h2>Profit & loss: ${fmtMonth(ym)}</h2><div class="right"><button class="btn small" data-act="ui" data-id="accTab=pl">Compare months</button></div></div>${finTable([fmtMonth(ym)], plRows([profitLoss(ym + "-01", lastDay(ym))]))}</div>
+    <div class="grid">
+      <div class="panel"><div class="panel-head"><h2>Money in the accounts</h2><span class="hint">Start of the month, money in, money out, end of the month.</span></div>${finTable(["Start", "In", "Out", "End"], cashRows(ym))}</div>
+      <div class="panel"><div class="panel-head"><h2>Transfers & other entries</h2><div class="right"><button class="btn small primary" data-act="acc-new" data-id="transfer">Transfer money</button><button class="btn small" data-act="acc-entry">+ Other</button></div></div>
+        ${entries.length ? `<ul class="list">${entries.map(j => `<li class="clickable" data-act="edit-entry" data-id="${esc(j.id)}"><div class="grow"><b>${esc(bookName(j.from))} → ${esc(bookName(j.to))}</b><span class="sub">${fmtDate(j.date)}${j.note ? " · " + esc(j.note) : ""}</span></div><b>${money(j.amount)}</b></li>`).join("")}</ul>`
+          : empty("Nothing this month. Use Transfer money to move money between the main account and petty cash.")}</div>
+      <div class="panel"><div class="panel-head"><h2>Not in the figures</h2><span class="hint">As of today. On a cash basis these count once the money moves.</span></div>${memoList()}</div>
+    </div></div>`;
+}
+
+function accPL(ym) {
+  const prev = U.addMonths(ym, -1), y = ym.slice(0, 4);
+  const pls = [profitLoss(ym + "-01", lastDay(ym)), profitLoss(prev + "-01", lastDay(prev)), profitLoss(`${y}-01-01`, lastDay(ym))];
+  const months = Array.from({ length: Number(ym.slice(5)) }, (_, i) => `${y}-${U.pad(i + 1)}`);
+  const by = months.map(m => profitLoss(m + "-01", lastDay(m)));
+  return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h2>Profit & loss</h2><span class="hint">Cash basis: income on the day it's received, costs on the day they're paid. Kit sold with a membership counts as kit sales.</span></div>
+      ${finTable([fmtMonth(ym), fmtMonth(prev), `${y} to date`], plRows(pls))}</div>
+    <div class="panel"><div class="panel-head"><h2>${y} month by month</h2></div>
+      ${finTable(months.map(m => fmtMonth(m).slice(0, 3)), [{ label: "Income", values: by.map(p => p.income) }, { label: "Costs", values: by.map(p => p.costs) }, { label: "Net profit (loss)", cls: "grand", values: by.map(p => p.net) }])}</div>`;
+}
+
+function accMain(ym) {
+  const pocket = S.ui.accPocket;
+  return `<div class="panel"><div class="panel-head"><h2>Main account: ${fmtMonth(ym)}</h2>
+      <div class="seg">${seg("accPocket", "", "Bank + cash")}${seg("accPocket", "bank", "Bank")}${seg("accPocket", "cash", "Cash in hand")}</div>
+      <div class="right"><button class="btn small primary" data-act="acc-new" data-id="transfer" data-from="${pocket || "cash"}" data-to="petty">Main account → petty cash</button><button class="btn small" data-act="acc-new" data-id="transfer" data-from="cash" data-to="bank">Cash paid into the bank</button></div></div>
+    <p class="hint panel-note">Card, bank transfer, payment link and cheque payments go to the bank; cash goes to the cash in hand. Tap a line to open it.</p>
+    ${statementTable(statement(pocket ? [pocket] : ["bank", "cash"], ym), !pocket)}</div>`;
+}
+
+function accPetty(ym) {
+  return `<div class="panel"><div class="panel-head"><h2>Petty cash: ${fmtMonth(ym)}</h2>
+      <div class="right"><button class="btn small primary" data-act="acc-new" data-id="transfer" data-from="cash" data-to="petty">Main account → petty cash</button><button class="btn small" data-act="acc-new" data-id="transfer" data-from="petty" data-to="cash">Petty cash → main account</button><button class="btn small" data-act="acc-petty-exp">+ Petty cash expense</button></div></div>
+    <p class="hint panel-note">Money put into the petty cash box comes in; small costs paid with petty cash go out. Count the box at the end of the month under Month end.</p>
+    ${statementTable(statement(["petty"], ym), false)}</div>`;
+}
+
+function accBS(ym) {
+  const end = lastDay(ym), prevEnd = lastDay(U.addMonths(ym, -1));
+  const bss = [balanceSheet(end), balanceSheet(prevEnd)];
+  return `<div class="cols-2">
+    <div class="panel"><div class="panel-head"><h2>Balance sheet on ${fmtDate(end)}</h2><div class="right"><button class="btn small" data-act="acc-start">Starting balances</button></div></div>
+      ${finTable([fmtDate(end), fmtDate(prevEnd)], bsRows(bss))}
+      <div class="panel-body">${Math.abs(bss[0].diff) < 0.01 ? `<div class="callout ok" style="margin:0">Balanced: what the club has = what it owes + the owner's equity.</div>` : `<div class="callout bad" style="margin:0">Out by ${money(bss[0].diff)}. Please report this.</div>`}</div></div>
+    <div class="panel"><div class="panel-head"><h2>Not in the balance sheet</h2><span class="hint">As of today. On a cash basis these count when the money moves.</span></div>${memoList()}
+      <div class="panel-body hint">The owner's equity at the start is what the club had on the starting day minus what it owed. Profit adds to it; money the owner takes out lowers it. Equipment, loans and the owner's money are added with "+ Add entry".</div></div>
+  </div>`;
+}
+
+function accSalaries(ym) {
+  const staff = staffList(), pr = payroll(ym);
+  const line = x => `${fmtDate(x.date)}: ${x.payKind || (/advance/i.test(x.description || "") ? "advance" : "salary")} ${money(x.amount)}${x.method ? ` (${x.method})` : ""}`;
+  return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h2>Salaries for ${fmtMonth(ym)}</h2><div class="right"><a class="btn small" href="#settings">Edit staff list</a><button class="btn small primary" data-act="pay-salary">Pay salary</button></div></div>
+      ${staff.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Staff</th><th class="num">Monthly salary</th><th class="num">Paid for ${fmtMonth(ym)}</th><th class="num">Still to pay</th><th></th></tr></thead><tbody>
+        ${pr.rows.map(r => `<tr><td><b>${esc(r.s.name)}</b><span class="sub">${esc([r.s.role, ...r.list.map(line)].filter(Boolean).join(" · "))}</span></td><td class="num">${money(r.s.salary)}</td><td class="num">${money(r.paid)}</td><td class="num">${r.left ? `<b>${money(r.left)}</b>` : badge("b-ok", "Paid")}</td>
+          <td class="actions">${r.left ? `<button class="btn small primary" data-act="pay-salary" data-id="${esc(r.s.name)}">Pay</button>` : ""}<button class="btn small" data-act="pay-salary" data-id="${esc(r.s.name)}" data-kind="Advance">Advance</button></td></tr>`).join("")}
+      </tbody><tfoot><tr><td>Total</td><td class="num">${money(sum(pr.rows, r => r.s.salary))}</td><td class="num">${money(sum(pr.rows, r => r.paid))}</td><td class="num">${money(sum(pr.rows, r => r.left))}</td><td></td></tr></tfoot></table></div>`
+      : empty(`Add the staff and their monthly salaries in <a href="#settings">Settings → Staff & salaries</a>. This page then shows who has been paid each month.`)}
+      <p class="hint panel-note" style="padding-bottom:12px">Advances count towards that month's salary. Every payment is saved as an expense under "${SALARY_CAT}", so it also shows in the expense log and the daily report.</p></div>
+    ${pr.other.length ? `<div class="panel"><div class="panel-head"><h2>Other salary payments in ${fmtMonth(ym)}</h2><span class="hint">Under ${SALARY_CAT}, but not matched to anyone on the staff list.</span></div>
+      <ul class="list">${pr.other.map(x => `<li class="clickable" data-act="edit-expense" data-id="${esc(x.id)}"><div class="grow"><b>${esc(x.description || x.vendor || "")}</b><span class="sub">${fmtDate(x.date)}${x.method ? " · " + esc(x.method) : ""}</span></div><b>${money(x.amount)}</b></li>`).join("")}</ul></div>` : ""}`;
+}
+
+function accClose(ym) {
+  const end = lastDay(ym), me = S.monthEnds.find(m => m.id === ym) || {};
+  const mark = ok => ok === null ? badge("b-info", "Info") : ok ? badge("b-ok", "Done") : badge("b-warn", "Check");
+  return `<div class="cols-2">
+    <div class="grid">
+      <div class="panel"><div class="panel-head"><h2>Month-end checklist: ${fmtMonth(ym)}</h2></div>${end < U.todayISO() ? "" : `<p class="hint panel-note">The month isn't over yet. Go through this after the last day.</p>`}
+        <ul class="list">${monthChecks(ym).map(([ok, label, detail]) => `<li><div class="grow">${esc(label)}${detail ? `<span class="sub">${esc(detail)}</span>` : ""}</div>${mark(ok)}</li>`).join("")}</ul></div>
+      <div class="panel"><div class="panel-head"><h2>Report for the manager</h2></div><div class="panel-body">
+        ${me.givenAt ? `<div class="callout ok">Given to the manager on ${U.fmtWhen(me.givenAt)} by ${esc(me.givenBy || "")}.</div>` : ""}
+        <p class="hint" style="margin-top:0">The Excel file has the profit & loss, balance sheet, main account, petty cash, income, costs and salaries, each on its own sheet. Print / PDF makes a short report on paper.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" data-act="acc-excel">Download Excel</button><button class="btn" data-act="acc-print">Print / PDF</button>${me.givenAt ? "" : `<button class="btn" data-act="month-given">Mark as given to the manager</button>`}</div></div></div>
+    </div>
+    <div class="panel"><div class="panel-head"><h2>Check the real money</h2><div class="right"><button class="btn small primary" data-act="acc-check">Enter the real amounts</button></div></div>
+      <p class="hint panel-note">Bank: the closing balance on the bank statement for ${fmtDate(end)}. Cash in hand and petty cash: count the money.</p>
+      <div class="table-wrap"><table class="t"><thead><tr><th>Account</th><th class="num">In the system</th><th class="num">Real amount</th><th class="num">Difference</th></tr></thead><tbody>
+      ${MONEY.map(a => {
+        const sys = balanceAt(a, end), c = me.counts?.[a], has = c !== undefined && c !== "", diff = has ? round(num(c) - sys) : null;
+        return `<tr><td><b>${esc(bookName(a))}</b>${diff < 0 ? `<button class="btn small" data-act="acc-diff" data-id="${a}" style="margin-top:6px;display:block">Add the ${money(-diff)} short as an expense</button>` : ""}</td><td class="num">${money(sys)}</td><td class="num">${has ? money(c) : "—"}</td>
+          <td class="num">${diff === null ? "—" : diff ? `<b style="color:var(--bad)">${diff > 0 ? "+" : "−"}${money(Math.abs(diff))}</b>` : badge("b-ok", "Matches")}</td></tr>`;
+      }).join("")}
+      </tbody></table></div>
+      ${me.note || me.checkedAt ? `<div class="panel-body hint">${me.note ? `Notes: ${esc(me.note)}<br>` : ""}${me.checkedAt ? `Checked ${U.fmtWhen(me.checkedAt)} by ${esc(me.checkedBy || "")}` : ""}</div>` : ""}</div>
+  </div>`;
+}
+
+// ---------- Accounts: forms ----------
+function openEntry(pre = {}) {
+  const j = pre.id ? S.journal.find(x => x.id === pre.id) : null;
+  if (pre.id && !j) return;
+  const kind = j?.kind && ENTRY_KINDS[j.kind] ? j.kind : ENTRY_KINDS[pre.kind] ? pre.kind : "transfer";
+  const [title, hint, froms, tos, f0, t0] = ENTRY_KINDS[kind];
+  const v = j || pre;
+  const opts = list => list.map(k => [k, bookName(k)]);
+  modal({
+    title,
+    body: `<div class="fgrid">
+      <p class="full hint" style="margin:0">${esc(hint)}</p>
+      <div><label for="j-from">From</label><select id="j-from" name="from">${options(opts(froms), v.from || f0)}</select></div>
+      <div><label for="j-to">To</label><select id="j-to" name="to">${options(opts(tos), v.to || t0)}</select></div>
+      ${kind === "transfer" ? `<div class="full"><button type="button" class="btn small" id="j-swap">⇅ Swap: the other way round</button></div>` : ""}
+      <div><label for="j-amount">Amount (${esc(S.settings.currency)}) *</label><input id="j-amount" name="amount" type="number" min="0" step="0.01" required inputmode="decimal" value="${esc(v.amount || "")}"></div>
+      <div><label for="j-date">Date</label><input id="j-date" name="date" type="date" required value="${esc(v.date || U.todayISO())}"></div>
+      <div><label for="j-ref">Reference / voucher no.</label><input id="j-ref" name="ref" maxlength="80" value="${esc(v.ref || "")}" autocomplete="off"></div>
+      <div><label for="j-note">Note</label><input id="j-note" name="note" maxlength="200" value="${esc(v.note || "")}" placeholder="e.g. Top up for this week"></div>
+      ${j ? `<div class="full hint">Added ${U.fmtWhen(j.createdAt)} by ${esc(j.createdBy || "")}</div>` : ""}</div>`,
+    footer: `<footer>${j ? `<button type="button" class="btn danger left" data-act="del-entry" data-id="${esc(j.id)}">Delete</button>` : ""}<button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">${j ? "Save changes" : "Save"}</button></footer>`,
+    onOpen(el) {
+      el.querySelector("#j-swap")?.addEventListener("click", () => {
+        const f = el.querySelector("#j-from"), t = el.querySelector("#j-to"), a = f.value;
+        f.value = t.value;
+        t.value = a;
+      });
+    },
+    async onSubmit(d) {
+      if (d.from === d.to) { U.toast("From and To need to be different accounts.", "error"); return false; }
+      if (!(num(d.amount) > 0)) { U.toast("Type the amount.", "error"); return false; }
+      const data = { kind, from: d.from, to: d.to, amount: round(num(d.amount)), date: d.date, ref: d.ref, note: d.note };
+      const what = `${money(data.amount)} from ${bookName(data.from)} to ${bookName(data.to)} on ${fmtDate(data.date)}`;
+      if (j) {
+        await store.update("journal", j.id, data);
+        await log(`Edited accounts entry: ${what}`);
+      } else {
+        await store.add("journal", { ...data, createdAt: U.nowISO(), createdBy: who() });
+        await log(`Accounts: ${title.toLowerCase()}, ${what}${data.note ? ` (${data.note})` : ""}`);
+      }
+      U.toast("Saved");
+    }
+  });
+}
+
+function openSalary(pre = {}) {
+  const staff = staffList(), ym = pre.month || S.ui.accMonth;
+  const s = staff.find(x => x.name === pre.staff);
+  const row = s ? payroll(ym).rows.find(r => r.s.name === s.name) : null;
+  const kind = pre.kind || "Salary";
+  modal({
+    title: kind === "Advance" ? "Salary advance" : "Pay salary", submitLabel: "Save payment",
+    body: `<div class="fgrid">
+      <div><label for="sp-staff">Staff member *</label><input id="sp-staff" name="staff" required list="sp-staff-list" value="${esc(s?.name || pre.staff || "")}" autocomplete="off" maxlength="120"><datalist id="sp-staff-list">${staff.map(x => `<option value="${esc(x.name)}">`).join("")}</datalist></div>
+      <div><label for="sp-kind">What</label><select id="sp-kind" name="kind">${options(["Salary", "Advance", "Bonus", "Coach fee", "Other"], kind)}</select></div>
+      <div><label for="sp-month">For the month of</label><input id="sp-month" name="month" type="month" required value="${ym}"></div>
+      <div><label for="sp-amount">Amount (${esc(S.settings.currency)}) *</label><input id="sp-amount" name="amount" type="number" min="0" step="0.01" required inputmode="decimal" value="${row && kind === "Salary" && row.left ? row.left : ""}"></div>
+      <div><label for="sp-method">Paid with</label><select id="sp-method" name="method">${options(EXP_METHODS, kind === "Advance" ? "Cash" : "Bank transfer")}</select></div>
+      <div><label for="sp-date">Date paid</label><input id="sp-date" name="date" type="date" required value="${U.todayISO()}"></div>
+      ${receiptFields("sp", "", "out", "voucherNo")}
+      <div class="full"><label for="sp-notes">Notes</label><input id="sp-notes" name="notes" maxlength="300"></div>
+      ${row ? `<div class="full hint">${esc(s.name)}: salary ${money(s.salary)}. Paid for ${fmtMonth(ym)} so far ${money(row.paid)}, still to pay ${money(row.left)}.</div>` : ""}
+    </div>`,
+    async onSubmit(d, form) {
+      const data = { category: SALARY_CAT, description: `${d.kind} ${fmtMonth(d.month)}: ${d.staff}`, vendor: d.staff, staff: d.staff, salaryMonth: d.month, payKind: d.kind, amount: round(num(d.amount)), method: d.method, date: d.date, status: "paid", voucherNo: d.voucherNo, notes: d.notes, createdAt: U.nowISO(), createdBy: who() };
+      if (!(data.amount > 0)) { U.toast("Type the amount paid.", "error"); return false; }
+      attachExpensePhotos(form, data, await store.add("expenses", data));
+      await log(`Paid ${d.kind.toLowerCase()} to ${d.staff}: ${money(data.amount)} for ${fmtMonth(d.month)} (${d.method})${data.voucherNo ? `, payment voucher no. ${data.voucherNo}` : ""}`);
+      U.toast("Saved");
+    }
+  });
+}
+
+function openStartBalances() {
+  const b = S.settings.books || {};
+  modal({
+    title: "Starting balances", submitLabel: "Save",
+    body: `<p class="hint" style="margin-top:0">How much was in each account at the start of this day: the bank statement balance, the cash in the drawer and in the petty cash box. Anything recorded before this date is left out of the balances, because it's already in these amounts. Income and costs still show for every month.</p>
+      <div class="fgrid">
+      <div class="full"><label for="sb-start">Accounts start on</label><input id="sb-start" name="start" type="date" required value="${esc(b.start || U.thisMonth() + "-01")}"></div>
+      ${BOOKS.filter(([k]) => k !== "drawings").map(([k, n]) => `<div><label for="sb-${k}">${esc(n)}</label><input id="sb-${k}" name="${k}" type="number" step="0.01" inputmode="decimal" value="${esc(b.opening?.[k] ?? "")}" placeholder="0"></div>`).join("")}
+      </div><p class="hint">Leave the last ones empty if you're not sure: the accountant can fill them in. The owner's equity at the start is worked out by itself.</p>`,
+    async onSubmit(d) {
+      const opening = {};
+      BOOKS.forEach(([k]) => { if (num(d[k])) opening[k] = round(num(d[k])); });
+      await patchSettings({ books: { start: d.start, opening, setAt: U.nowISO(), setBy: who() } });
+      await log(`Set the accounts' starting balances on ${fmtDate(d.start)}: ${MONEY.map(k => `${bookName(k)} ${money(opening[k] || 0)}`).join(", ")}`);
+      U.toast("Starting balances saved");
+    }
+  });
+}
+
+function openMonthCheck(ym) {
+  const end = lastDay(ym), me = S.monthEnds.find(m => m.id === ym) || {};
+  modal({
+    title: `Check the real money: ${fmtMonth(ym)}`, submitLabel: "Save the check",
+    body: `<p class="hint" style="margin-top:0">For ${fmtDate(end)}. Bank: the closing balance on the bank statement. Cash in hand and petty cash: count the money.</p><div class="fgrid">
+      ${MONEY.map(a => `<div><label for="mc-${a}">${esc(bookName(a))}</label><input id="mc-${a}" name="${a}" type="number" step="0.01" inputmode="decimal" value="${esc(me.counts?.[a] ?? "")}"><span class="hint">In the system: ${money(balanceAt(a, end))}</span></div>`).join("")}
+      <div class="full"><label for="mc-note">Notes for the accountant</label><input id="mc-note" name="note" maxlength="500" value="${esc(me.note || "")}" placeholder="e.g. the receipt for 20 AED was lost"></div></div>`,
+    async onSubmit(d) {
+      const counts = Object.fromEntries(MONEY.map(a => [a, d[a] === "" ? "" : round(num(d[a]))]));
+      const { id, ...rest } = me;
+      await store.set("monthEnds", ym, { ...rest, month: ym, counts, system: Object.fromEntries(MONEY.map(a => [a, balanceAt(a, end)])), note: d.note, checkedAt: U.nowISO(), checkedBy: who() });
+      await log(`Month-end check for ${fmtMonth(ym)}: ${MONEY.filter(a => counts[a] !== "").map(a => `${bookName(a)} ${money(counts[a])}`).join(", ") || "no amounts"}`);
+      U.toast("Saved");
+    }
+  });
+}
+
+function openAccountsPrint(ym) {
+  const end = lastDay(ym), y = ym.slice(0, 4), pr = payroll(ym), me = S.monthEnds.find(m => m.id === ym) || {};
+  modal({
+    title: `Monthly accounts: ${fmtMonth(ym)}`, wide: true,
+    body: `<div class="acc-print">
+      <div class="r-head"><div><img src="images/logo.png" alt="${esc(S.settings.clubName)}"><div class="hint" style="margin-top:6px">Emirates City, Ajman, UAE</div></div>
+        <div style="text-align:right"><b style="font-size:18px">MONTHLY ACCOUNTS</b><br>${fmtMonth(ym)}<br><span class="hint">Made ${U.fmtWhen(U.nowISO())} by ${esc(who())}</span></div></div>
+      <h3>Profit & loss</h3>${finTable([fmtMonth(ym), `${y} to date`], plRows([profitLoss(ym + "-01", end), profitLoss(`${y}-01-01`, end)]))}
+      <h3>Money in the accounts</h3>${finTable(["Start", "In", "Out", "End"], cashRows(ym))}
+      <h3>Balance sheet on ${fmtDate(end)}</h3>${finTable([fmtDate(end)], bsRows([balanceSheet(end)]))}
+      ${pr.rows.length || pr.other.length ? `<h3>Salaries for ${fmtMonth(ym)}</h3>${finTable(["Salary", "Paid", "To pay"], [...pr.rows.map(r => ({ label: r.s.name, sub: r.s.role, values: [num(r.s.salary), r.paid, r.left] })), ...pr.other.map(x => ({ label: x.vendor || x.description, sub: "Not on the staff list", values: [0, num(x.amount), 0] }))])}` : ""}
+      <h3>Not in the figures (as of today)</h3>${finTable(["Amount"], memoItems().map(([l, v, s]) => ({ label: l, sub: s, values: [v] })))}
+      ${me.note ? `<h3>Notes</h3><p>${esc(me.note)}</p>` : ""}
+      <p class="hint" style="margin-top:16px">Cash basis: income on the day it's received, costs on the day they're paid. Amounts in ${esc(S.settings.currency || "AED")}.</p></div>`,
+    footer: `<footer><button type="button" class="btn" data-close>Close</button><button type="button" class="btn" data-act="acc-excel" data-id="${ym}">Download Excel</button><button type="button" class="btn primary" data-act="print">Print / save as PDF</button></footer>`
+  });
+}
+
+// ---------- Accounts: Excel file ----------
+// A statement sheet (P&L, balance sheet). Totals are Excel formulas, so the accountant can change a number and it adds up.
+function finSheet({ name, heading, note, heads, rows, grand, rowTotal = false }) {
+  const n = heads.length, w = n + (rowTotal ? 1 : 0), totals = [];
+  const out = [[{ v: S.settings.clubName, s: "title" }], [{ v: heading, s: "bold" }], [{ v: note, s: "muted" }], [],
+    [{ v: S.settings.currency || "AED", s: "head" }, ...heads.map(h => ({ v: h, s: "headNum" })), ...(rowTotal ? [{ v: "Total", s: "headNum" }] : [])]];
+  let first = out.length;
+  const across = (at, s, v) => rowTotal ? [{ f: `SUM(${cellRef(1, at)}:${cellRef(n, at)})`, v: round(v), s }] : [];
+  for (const r of rows) {
+    const at = out.length, all = sum(r.values || [], v => v);
+    if (r.sec) {
+      out.push([{ v: r.sec, s: "section" }, ...Array(w).fill({ v: "", s: "section" })]);
+      first = at + 1;
+    } else if (r.cls === "total") {
+      out.push([{ v: r.label, s: "total" }, ...r.values.map((v, i) => ({ f: first < at ? `SUM(${cellRef(i + 1, first)}:${cellRef(i + 1, at - 1)})` : "0", v: round(v), s: "totalMoney" })), ...across(at, "totalMoney", all)]);
+      totals.push(at);
+    } else if (r.cls === "grand" && grand && totals.length) {
+      out.push([{ v: r.label, s: "bold" }, ...r.values.map((v, i) => ({ f: grand(totals.map(t => cellRef(i + 1, t))), v: round(v), s: "grand" })), ...across(at, "grand", all)]);
+    } else {
+      out.push([{ v: r.label + (r.sub ? ` (${r.sub})` : ""), s: r.cls ? "bold" : "" }, ...r.values.map(v => ({ v: round(v), s: r.cls ? "boldMoney" : "money" })), ...across(at, r.cls ? "boldMoney" : "money", all)]);
+    }
+  }
+  return { name, rows: out, cols: [44, ...Array(w).fill(15)], freeze: 5, landscape: w > 4, footer: `${S.settings.clubName}: ${heading}` };
+}
+
+// A money account for the month with a running balance worked out by Excel.
+function statementSheet(name, label, accts, ym) {
+  const st = statement(accts, ym), many = accts.length > 1;
+  const heads = ["Date", "Particulars", "Type / category", "Ref. / voucher no.", ...(many ? ["Account"] : []), "Method", "In", "Out", "Balance"];
+  const n = heads.length, I = n - 3, O = n - 2, B = n - 1;
+  const out = [[{ v: S.settings.clubName, s: "title" }], [{ v: `${label}: ${fmtMonth(ym)}`, s: "bold" }], [{ v: `Made ${U.fmtWhen(U.nowISO())}. Amounts in ${S.settings.currency || "AED"}.${many ? " Cash paid into the bank isn't listed here, because it stays inside the main account." : ""}`, s: "muted" }], [],
+    heads.map((h, i) => ({ v: h, s: i >= I ? "headNum" : "head" }))];
+  out.push([ym + "-01", { v: "Balance at the start of the month", s: "bold" }, ...Array(n - 3).fill(null), { v: st.opening, s: "boldMoney" }]);
+  const first = out.length;
+  for (const r of st.rows) {
+    const at = out.length;
+    out.push([r.date, r.text, r.sub || "", r.ref || "", ...(many ? [bookName(r.acct)] : []), r.method || "",
+      r.delta > 0 ? { v: r.delta, s: "money" } : null, r.delta < 0 ? { v: -r.delta, s: "money" } : null,
+      { f: `${cellRef(B, at - 1)}+${cellRef(I, at)}-${cellRef(O, at)}`, v: r.bal, s: "money" }]);
+  }
+  const last = out.length - 1, range = c => st.rows.length ? `SUM(${cellRef(c, first)}:${cellRef(c, last)})` : "0";
+  out.push([lastDay(ym), { v: "Balance at the end of the month", s: "total" }, ...Array(n - 5).fill({ v: "", s: "total" }),
+    { f: range(I), v: st.ins, s: "totalMoney" }, { f: range(O), v: st.outs, s: "totalMoney" }, { f: cellRef(B, last), v: st.closing, s: "grand" }]);
+  return { name, rows: out, cols: [13, 34, 24, 16, ...(many ? [26] : []), 14, 13, 13, 14], freeze: 5, landscape: true, filter: st.rows.length ? `A5:${cellRef(B, last)}` : "", footer: `${S.settings.clubName}: ${label} ${fmtMonth(ym)}` };
+}
+
+function accountsWorkbook(ym) {
+  const from = ym + "-01", end = lastDay(ym), prev = U.addMonths(ym, -1), y = ym.slice(0, 4);
+  const made = `Made ${U.fmtWhen(U.nowISO())} by ${who()}. Amounts in ${S.settings.currency || "AED"}. Cash basis: income on the day it's received, costs on the day they're paid.`;
+  const inMonth = d => (d || "").slice(0, 10) >= from && (d || "").slice(0, 10) <= end;
+  const pl = profitLoss(from, end), ytd = profitLoss(`${y}-01-01`, end), bs = balanceSheet(end), pr = payroll(ym);
+  const me = S.monthEnds.find(m => m.id === ym) || {};
+  const months = Array.from({ length: Number(ym.slice(5)) }, (_, i) => `${y}-${U.pad(i + 1)}`);
+  const H = (...h) => h.map((x, i) => ({ v: x, s: i ? "headNum" : "head" }));
+  const M = v => ({ v: round(v), s: "money" });
+
+  const top = [[{ v: S.settings.clubName, s: "title" }], [{ v: `Monthly accounts: ${fmtMonth(ym)}`, s: "bold" }], [{ v: made, s: "muted" }], [],
+    H("Profit & loss", fmtMonth(ym), `${y} to date`), ["Income", M(pl.income), M(ytd.income)], ["Costs", M(pl.costs), M(ytd.costs)],
+    [{ v: "Net profit (loss)", s: "bold" }, { f: "B6-B7", v: pl.net, s: "grand" }, { f: "C6-C7", v: ytd.net, s: "grand" }], [],
+    H("Money in the accounts", "Start of month", "In", "Out", "End of month")];
+  const c0 = top.length, cash = cashRows(ym);
+  cash.forEach(r => top.push(r.cls ? [{ v: r.label, s: "total" }, ...r.values.map((v, k) => ({ f: `SUM(${cellRef(k + 1, c0)}:${cellRef(k + 1, c0 + cash.length - 2)})`, v, s: "totalMoney" }))] : [r.label, ...r.values.map(M)]));
+  top.push([], H(`Balance sheet on ${fmtDate(end)}`, "Amount"), ["Total assets (what the club has)", M(bs.totalAssets)], ["Total liabilities (what it owes)", M(bs.totalLiab)], ["Owner's equity", M(bs.totalEquity)],
+    ["Balanced", Math.abs(bs.diff) < 0.01 ? "Yes" : `No, out by ${bs.diff}`], [], H("Month-end checks", "", ""));
+  monthChecks(ym).forEach(([ok, label, detail]) => top.push([label, ok === null ? "" : ok ? "Done" : "Check", detail || ""]));
+  top.push([], H("Real money checked", "In the system", "Real amount", "Difference"));
+  MONEY.forEach(a => { const c = me.counts?.[a], sys = balanceAt(a, end), has = c !== undefined && c !== ""; top.push([bookName(a), M(sys), has ? M(num(c)) : "", has ? M(num(c) - sys) : ""]); });
+  if (me.note) top.push(["Notes", me.note]);
+  top.push([], H("Not in the figures (on the day this file was made)", "Amount", ""), ...memoItems().map(([l, v, s]) => [l, M(v), s]), [],
+    [me.givenAt ? `Given to the manager on ${U.fmtWhen(me.givenAt)} by ${me.givenBy || ""}.` : "Not marked as given to the manager yet."]);
+
+  const sheet = (name, opts) => ({ ...tableSheet({ name, ...opts }), footer: `${S.settings.clubName}: ${name} ${fmtMonth(ym)}` });
+  return [
+    { name: "Summary", rows: top, cols: [46, 16, 16, 16, 16], tabSelected: true, footer: `${S.settings.clubName}: accounts ${fmtMonth(ym)}` },
+    finSheet({ name: "Profit & Loss", heading: `Profit & loss: ${fmtMonth(ym)}`, note: made, heads: [fmtMonth(ym), fmtMonth(prev), `${y} to date`], rows: plRows([pl, profitLoss(prev + "-01", lastDay(prev)), ytd]), grand: t => `${t[0]}-${t[1]}` }),
+    finSheet({ name: "P&L by month", heading: `Profit & loss by month: ${y}`, note: made, heads: months.map(fmtMonth), rows: plRows(months.map(m => profitLoss(m + "-01", lastDay(m)))), grand: t => `${t[0]}-${t[1]}`, rowTotal: true }),
+    finSheet({ name: "Balance Sheet", heading: `Balance sheet on ${fmtDate(end)}`, note: made, heads: [fmtDate(end), fmtDate(lastDay(prev))], rows: bsRows([bs, balanceSheet(lastDay(prev))]), grand: t => `${t[1]}+${t[2]}` }),
+    statementSheet("Main account", "Main account (bank + cash in hand)", ["bank", "cash"], ym),
+    statementSheet("Bank", bookName("bank"), ["bank"], ym),
+    statementSheet("Cash in hand", bookName("cash"), ["cash"], ym),
+    statementSheet("Petty cash", "Petty cash", ["petty"], ym),
+    sheet("Income", { title: `Income: ${fmtMonth(ym)}`, note: "Every payment received in the month.", rows: S.payments.filter(p => inMonth(p.date)).sort(byDate),
+      cols: [["Date", "date", "date"], ["Receipt voucher no.", "bookNo"], ["Receipt", "receipt"], ["Received from", p => p.memberName || p.payerName], ["Type", p => p.type || "Membership"], ["For", p => { const ms = p.membershipId ? membershipById(p.membershipId) : null; return ms ? whatOf(ms) : p.note || ""; }], ["Method", "method"], ["Account", p => bookName(IN_ACCT[p.method] || "cash")], ["Amount", "amount", "money"], ["Recorded by", "createdBy"]] }),
+    sheet("Costs", { title: `Costs: ${fmtMonth(ym)}`, note: "Every expense paid in the month, salaries included.", rows: S.expenses.filter(x => x.status !== "unpaid" && inMonth(x.date)).sort(byDate),
+      cols: [["Date", "date", "date"], ["Payment voucher no.", "voucherNo"], ["Description", "description"], ["Category", "category"], ["Paid to", "vendor"], ["Method", "method"], ["Account", x => bookName(OUT_ACCT[x.method] || "cash")], ["Amount", "amount", "money"], ["Reference", "ref"], ["Recorded by", "createdBy"]] }),
+    sheet("Salaries", { title: `Salaries for ${fmtMonth(ym)}`, note: "Advances count towards the month's salary.",
+      rows: [...pr.rows.map(r => ({ name: r.s.name, role: r.s.role || "", salary: num(r.s.salary), paid: r.paid, left: r.left, detail: r.list.map(x => `${fmtDate(x.date)} ${x.payKind || "payment"} ${x.amount}${x.method ? ` (${x.method})` : ""}`).join("; ") })),
+        ...pr.other.map(x => ({ name: x.vendor || x.description, role: "Not on the staff list", salary: "", paid: num(x.amount), left: "", detail: `${fmtDate(x.date)} ${x.description || ""}${x.method ? ` (${x.method})` : ""}` }))],
+      cols: [["Staff", "name"], ["Role", "role"], ["Monthly salary", "salary", "money"], [`Paid for ${fmtMonth(ym)}`, "paid", "money"], ["Still to pay", "left", "money"], ["Payments", "detail"]] }),
+    sheet("Transfers & entries", { title: `Transfers & other entries: ${fmtMonth(ym)}`, note: "Money moved between accounts, and the owner's or the accountant's entries.", rows: S.journal.filter(j => inMonth(j.date)).sort(byDate),
+      cols: [["Date", "date", "date"], ["What", j => ENTRY_KINDS[j.kind]?.[0] || "Entry"], ["From", j => bookName(j.from)], ["To", j => bookName(j.to)], ["Amount", "amount", "money"], ["Reference", "ref"], ["Note", "note"], ["Added by", "createdBy"]] }),
+    sheet("Money owed", { title: "Money owed by members", note: `On ${fmtDate(U.todayISO())}, the day this file was made.`, rows: owingList(),
+      cols: [["Member", r => r.m.name], ["Phone", r => r.m.phone || r.m.guardianPhone || ""], ["Owes for", r => r.o.list.map(x => whatOf(x.ms)).join("; ")], ["Amount owed", r => r.o.total, "money"]] }),
+    sheet("Unpaid bills", { title: "Unpaid bills & invoices", note: `On ${fmtDate(U.todayISO())}, the day this file was made.`, rows: S.expenses.filter(x => x.status === "unpaid").sort((a, b) => (a.dueDate || "").localeCompare(b.dueDate || "")),
+      cols: [["Due date", "dueDate", "date"], ["Description", "description"], ["Category", "category"], ["Paid to", "vendor"], ["Amount", "amount", "money"]] })
+  ];
+}
+
+async function downloadAccounts(ym) {
+  const data = buildXlsx(accountsWorkbook(ym), { title: `${S.settings.clubName}: accounts ${fmtMonth(ym)}`, author: who() });
+  U.download(`wariors-accounts-${ym}.xlsx`, data, XLSX_TYPE);
+  await log(`Downloaded the accounts for ${fmtMonth(ym)} as an Excel file`);
+}
+
+const VIEWS = { dashboard: viewDashboard, members: viewMembers, payments: viewPayments, receipts: viewReceipts, expenses: viewExpenses, schedule: viewSchedule, equipment: viewEquipment, leads: viewLeads, attendance: viewAttendance, reports: viewReports, accounts: viewAccounts, activity: viewActivity, settings: viewSettings };
 
 // ---------- Forms ----------
 function nextReceipt() {
@@ -2238,27 +2828,29 @@ function openReceiptPhoto(id) {
   return h;
 }
 
-// ---------- CSV import / export ----------
+// ---------- Import (CSV) / export (Excel) ----------
 const MEMBER_COLS = [["Name", "name"], ["Phone", "phone"], ["Kid or adult", "ageGroup"], ["Guardian name", "guardianName"], ["Guardian phone", "guardianPhone"], ["Programs", m => (m.programs || []).join("; ")],
   ["Status", m => stateOf(m).state], ["Plan", m => latestOf(m.id)?.plan || ""], ["Membership start", m => latestOf(m.id)?.startDate || ""], ["Membership end", m => latestOf(m.id)?.endDate || ""],
-  ["Owes", m => owedOf(m).total || ""], ["Joining date", "joinDate"], ["Date of birth", "dob"], ["Cancelled on", "cancelDate"], ["Cancel reason", "cancelReason"], ["Asked to renew", m => m.cancelAskedAt ? m.cancelAskedAt.slice(0, 10) : ""], ["Answer", "cancelAnswer"], ["Email", "email"], ["Belt / rank", "belt"], ["Notes", "notes"]];
-const PAY_COLS = [["Date", "date"], ["Receipt", "receipt"], ["Receipt no.", "bookNo"], ["Member / payer", p => p.memberName || p.payerName], ["Type", p => p.type || "Membership"], ["For", p => { const ms = p.membershipId ? membershipById(p.membershipId) : null; return ms ? whatOf(ms) : ""; }], ["Amount", "amount"], ["Method", "method"], ["Note", "note"], ["Recorded by", "createdBy"]];
+  ["Owes", m => owedOf(m).total || "", "money"], ["Joining date", "joinDate"], ["Date of birth", "dob"], ["Cancelled on", "cancelDate"], ["Cancel reason", "cancelReason"], ["Asked to renew", m => m.cancelAskedAt ? m.cancelAskedAt.slice(0, 10) : ""], ["Answer", "cancelAnswer"], ["Email", "email"], ["Belt / rank", "belt"], ["Notes", "notes"]];
+const PAY_COLS = [["Date", "date"], ["Receipt", "receipt"], ["Receipt no.", "bookNo"], ["Member / payer", p => p.memberName || p.payerName], ["Type", p => p.type || "Membership"], ["For", p => { const ms = p.membershipId ? membershipById(p.membershipId) : null; return ms ? whatOf(ms) : ""; }], ["Amount", "amount", "money"], ["Method", "method"], ["Note", "note"], ["Recorded by", "createdBy"]];
 
+// Real Excel files (.xlsx): amounts are numbers with totals, dates are dates, and each column can be filtered.
 function exportData(kind) {
-  const stamp = U.todayISO();
+  const stamp = U.todayISO(), ym = S.ui.payMonth;
   const files = {
-    members: () => [`members-${stamp}.csv`, U.toCSV([...S.members].sort(byName), MEMBER_COLS)],
-    payments: () => [`payments-${stamp}.csv`, U.toCSV([...S.payments].sort((a, b) => (a.date || "").localeCompare(b.date || "")), PAY_COLS)],
-    "payments-month": () => [`payments-${S.ui.payMonth}.csv`, U.toCSV(S.payments.filter(p => (p.date || "").startsWith(S.ui.payMonth)).sort((a, b) => (a.date || "").localeCompare(b.date || "")), PAY_COLS)],
-    expenses: () => [`expenses-${stamp}.csv`, U.toCSV([...S.expenses].sort((a, b) => (a.date || "").localeCompare(b.date || "")), [["Date", "date"], ["Category", "category"], ["Description", "description"], ["Paid to", "vendor"], ["Amount", "amount"], ["Status", "status"], ["Paid with", "method"], ["Due date", "dueDate"], ["Reference", "ref"], ["Notes", "notes"], ["Recorded by", "createdBy"]])],
-    equipment: () => [`equipment-stock-${stamp}.csv`, U.toCSV(S.equipment, [["Item", "name"], ["For sale", e => e.forSale ? "yes" : ""], ["Category", "category"], ["Quantity", "qty"], ["Selling price", "salePrice"], ["Condition", "condition"], ["Cost per item", "unitCost"], ["Purchase date", "purchaseDate"], ["Supplier", "supplier"], ["Location", "location"], ["Next service", "serviceDue"], ["Notes", "notes"]])],
-    leads: () => [`trial-requests-${stamp}.csv`, U.toCSV(S.leads, [["Received", r => (r.createdAt || "").slice(0, 10)], ["Name", "name"], ["Phone", "phone"], ["Program", "program"], ["Who", "ageGroup"], ["Best time", "preferredTime"], ["Source", "source"], ["Status", "status"], ["Trial date", "trialDate"], ["Message", "message"]])],
-    attendance: () => [`attendance-${stamp}.csv`, U.toCSV([...S.attendance].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), [["Date", "date"], ["Time", "time"], ["Member", "memberName"], ["Class", "program"], ["Checked in by", "by"]])],
-    cashbook: () => [`cash-book-${S.ui.repMonth}.csv`, U.toCSV(cashBook(S.ui.repMonth, S.ui.cashMethod), [["Date", "date"], ["Particulars", "text"], ["Type / category", "sub"], ["Method", "method"], ["Cash in", r => r.inAmt || ""], ["Cash out", r => r.outAmt || ""], ["Balance", "bal"]])],
-    year: () => [`summary-${S.ui.repYear}.csv`, U.toCSV(Array.from({ length: 12 }, (_, i) => monthStats(`${S.ui.repYear}-${U.pad(i + 1)}`)), [["Month", s => fmtMonth(s.m)], ["Membership income", "mem"], ["Other income", "other"], ["Total income", "inc"], ["Expenses", "exp"], ["Net", "net"], ["New members", "joined"], ["Cancellations", "cancelled"]])]
+    members: () => [`members-${stamp}`, "Members", [...S.members].sort(byName), MEMBER_COLS],
+    payments: () => [`payments-${stamp}`, "Payments", [...S.payments].sort(byDate), PAY_COLS],
+    "payments-month": () => [`payments-${ym}`, `Payments ${fmtMonth(ym)}`, S.payments.filter(p => (p.date || "").startsWith(ym)).sort(byDate), PAY_COLS],
+    expenses: () => [`expenses-${stamp}`, "Expenses", [...S.expenses].sort(byDate), [["Date", "date"], ["Category", "category"], ["Description", "description"], ["Paid to", "vendor"], ["Amount", "amount", "money"], ["Status", "status"], ["Paid with", "method"], ["Payment voucher no.", "voucherNo"], ["Due date", "dueDate"], ["Reference", "ref"], ["Notes", "notes"], ["Recorded by", "createdBy"]]],
+    equipment: () => [`equipment-stock-${stamp}`, "Equipment & stock", S.equipment, [["Item", "name"], ["For sale", e => e.forSale ? "yes" : ""], ["Category", "category"], ["Quantity", "qty", "int"], ["Selling price", "salePrice", "money"], ["Condition", "condition"], ["Cost per item", "unitCost", "money"], ["Purchase date", "purchaseDate"], ["Supplier", "supplier"], ["Location", "location"], ["Next service", "serviceDue"], ["Notes", "notes"]]],
+    leads: () => [`trial-requests-${stamp}`, "Trial requests", S.leads, [["Received", r => (r.createdAt || "").slice(0, 10)], ["Name", "name"], ["Phone", "phone"], ["Program", "program"], ["Who", "ageGroup"], ["Best time", "preferredTime"], ["Source", "source"], ["Status", "status"], ["Trial date", "trialDate"], ["Message", "message"]]],
+    attendance: () => [`attendance-${stamp}`, "Attendance", [...S.attendance].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), [["Date", "date"], ["Time", "time"], ["Member", "memberName"], ["Class", "program"], ["Checked in by", "by"]]],
+    cashbook: () => [`cash-book-${S.ui.repMonth}`, `Cash book ${fmtMonth(S.ui.repMonth)}`, cashBook(S.ui.repMonth, S.ui.cashMethod), [["Date", "date"], ["Particulars", "text"], ["Type / category", "sub"], ["Method", "method"], ["Cash in", r => r.inAmt || "", "money"], ["Cash out", r => r.outAmt || "", "money"], ["Balance", "bal", "money"]], false],
+    year: () => [`summary-${S.ui.repYear}`, `Summary ${S.ui.repYear}`, Array.from({ length: 12 }, (_, i) => monthStats(`${S.ui.repYear}-${U.pad(i + 1)}`)), [["Month", s => fmtMonth(s.m)], ["Membership income", "mem", "money"], ["Other income", "other", "money"], ["Total income", "inc", "money"], ["Expenses", "exp", "money"], ["Net", "net", "money"], ["New members", "joined", "int"], ["Cancellations", "cancelled", "int"]]]
   };
-  const [name, csv] = files[kind]();
-  U.download(name, csv);
+  const [file, title, rows, cols, total = true] = files[kind]();
+  const sheet = tableSheet({ name: title, title: `${S.settings.clubName}: ${title}`, note: `Made ${U.fmtWhen(U.nowISO())} by ${who()}`, cols, rows, total });
+  U.download(`${file}.xlsx`, buildXlsx([sheet], { title, author: who() }), XLSX_TYPE);
 }
 
 const ALIASES = {
@@ -2397,6 +2989,7 @@ async function saveSettings() {
   d.renewWindow = num(d.renewWindow);
   d.plans = (d.plans || []).filter(p => String(p.name || "").trim()).map(p => ({ name: p.name.trim(), months: num(p.months), kids: num(p.kids), adults: num(p.adults) }));
   d.extraFees = (d.extraFees || []).filter(p => String(p.name || "").trim()).map(p => ({ name: p.name.trim(), kids: num(p.kids), adults: num(p.adults) }));
+  d.staff = (d.staff || []).filter(p => String(p.name || "").trim()).map(p => ({ name: p.name.trim(), role: String(p.role || "").trim(), salary: num(p.salary) }));
   d.bills = (d.bills || []).filter(b => String(b.name || "").trim()).map(b => ({ id: b.id, name: b.name.trim(), category: b.category, amount: num(b.amount), dueDay: Math.min(31, Math.max(1, num(b.dueDay) || 1)), startMonth: b.startMonth || U.thisMonth() }));
   // Rows stay in typing order while editing (so a changed day doesn't move the row under the cursor); sorted on save.
   d.schedule = (d.schedule || []).filter(s => String(s.class || "").trim() && s.from).map(s => ({ day: s.day, from: s.from, to: s.to, class: s.class.trim(), group: s.group }))
@@ -2450,7 +3043,7 @@ async function seedDemo() {
   const expenses = [
     ["Electricity & water (FEWA)", "Utilities (electricity & water)", 690, "Bank transfer", `${U.addMonths(ym, -1)}-17`],
     ["Mobile bill", "Internet & phone", 197, "Bank transfer", `${U.addMonths(ym, -1)}-26`],
-    ["Coach advance", "Salaries & coach fees", 500, "Cash", dAgo(9)],
+    ["Coach Sam advance", "Salaries & coach fees", 500, "Cash", dAgo(9)],
     ["Fuel", "Transport & fuel", 50, "Petty cash", dAgo(4)],
     ["Tea & water", "Office supplies & refreshments", 12, "Petty cash", dAgo(2)],
     ["Washroom cleaning", "Cleaning & supplies", 25, "Petty cash", dAgo(1)]
@@ -2465,7 +3058,10 @@ async function seedDemo() {
   const handouts = [{ id: "demo-h1", name: "Mariam & Ali", memberId: "demo-m9", item: "T-shirt", done: false, createdAt: U.nowISO() }];
   const schedule = [["Mon", "07:00", "08:00", "Yoga", "Ladies"], ["Mon", "16:00", "17:00", "Karate", "Kids"], ["Mon", "20:00", "21:00", "Kickboxing, Muay Thai, MMA", "Adults – mix"], ["Tue", "10:00", "11:00", "Zumba", "Ladies"], ["Tue", "21:00", "22:00", "Boxing", "Adults – mix"], ["Wed", "19:00", "20:00", "Kalaripayattu", "Kids"], ["Thu", "16:00", "17:00", "Kickboxing, Muay Thai, MMA", "Kids"], ["Fri", "07:00", "08:00", "Yoga", "Ladies"], ["Sat", "20:00", "21:00", "Kalaripayattu", "Adults – mix"]]
     .map(([day, from, to, cls, group]) => ({ day, from, to, class: cls, group }));
-  const settings = { ...DEFAULT_SETTINGS, plans: [{ name: "Monthly", months: 1, kids: 250, adults: 300 }, { name: "Three Months", months: 3, kids: 599, adults: 699 }, { name: "Six Months", months: 6, kids: 1099, adults: 1299 }, { name: "One Year", months: 12, kids: 1799, adults: 2099 }], extraFees: [{ name: "Registration fee", kids: 100, adults: 100 }, { name: "Uniform fee", kids: 100, adults: 100 }], schedule, bills: [{ id: "bill-ewe", name: "Electricity & water (FEWA)", category: "Utilities (electricity & water)", amount: 683, dueDay: 17, startMonth: U.addMonths(ym, -1) }] };
+  const settings = { ...DEFAULT_SETTINGS, plans: [{ name: "Monthly", months: 1, kids: 250, adults: 300 }, { name: "Three Months", months: 3, kids: 599, adults: 699 }, { name: "Six Months", months: 6, kids: 1099, adults: 1299 }, { name: "One Year", months: 12, kids: 1799, adults: 2099 }], extraFees: [{ name: "Registration fee", kids: 100, adults: 100 }, { name: "Uniform fee", kids: 100, adults: 100 }], schedule, bills: [{ id: "bill-ewe", name: "Electricity & water (FEWA)", category: "Utilities (electricity & water)", amount: 683, dueDay: 17, startMonth: U.addMonths(ym, -1) }],
+    staff: [{ name: "Coach Sam", role: "MMA coach", salary: 3000 }, { name: "Coach Lina", role: "Yoga coach", salary: 1500 }], books: { start: U.addMonths(ym, -3) + "-01", opening: { bank: 5000, cash: 600, petty: 300 } } };
+  const journal = [["cash", "petty", 200, dAgo(12), "Top up"], ["cash", "bank", 1000, dAgo(6), "Cash paid into the bank"]]
+    .map(([from, to, amount, date, note], i) => ({ id: `demo-j${i + 1}`, kind: "transfer", from, to, amount, date, note, createdAt: U.nowISO(), createdBy: "demo" }));
   await store.addMany("members", members);
   await store.addMany("memberships", memberships);
   await store.addMany("payments", payments);
@@ -2473,6 +3069,7 @@ async function seedDemo() {
   await store.addMany("equipment", equipment);
   await store.addMany("leads", leads);
   await store.addMany("handouts", handouts);
+  await store.addMany("journal", journal);
   await store.set("settings", "main", settings);
   await store.add("activity", { at: U.nowISO(), by: "demo", text: "Loaded sample data (made-up people and prices, for trying the dashboard)" });
 }
@@ -2521,6 +3118,47 @@ const ACTIONS = {
   print() { document.body.classList.add("printing"); window.print(); setTimeout(() => document.body.classList.remove("printing"), 300); },
   "edit-payment": id => openEditPayment(id),
   "daily-report": day => openDailyReport(day),
+  // Accounts
+  "acc-entry"() {
+    const h = modal({
+      title: "Add to the accounts",
+      body: `<div class="quick-grid">
+        ${Object.entries(ENTRY_KINDS).map(([k, [t, hint]]) => `<button type="button" class="btn${k === "transfer" ? " primary" : ""}" data-act="acc-new" data-id="${k}">${esc(t)}<span class="sub">${esc(hint)}</span></button>`).join("")}
+        <button type="button" class="btn" data-act="pay-salary">Pay a salary or advance</button>
+        <button type="button" class="btn" data-act="new-expense">Add an expense or bill</button>
+        <button type="button" class="btn" data-act="acc-start">Starting balances</button>
+      </div>`,
+      footer: `<footer><button type="button" class="btn" data-close>Close</button></footer>`
+    });
+    h.el.addEventListener("click", e => { if (e.target.closest("[data-act]")) h.close(); });
+  },
+  "acc-new": (kind, el) => openEntry({ kind, from: el.dataset.from, to: el.dataset.to }),
+  "edit-entry": id => openEntry({ id }),
+  async "del-entry"(id) {
+    const j = S.journal.find(x => x.id === id);
+    if (!j || !(await U.confirmBox(`Delete this entry: ${money(j.amount)} from ${esc(bookName(j.from))} to ${esc(bookName(j.to))} on ${fmtDate(j.date)}?`, { danger: true, okLabel: "Delete" }))) return;
+    await store.remove("journal", id);
+    await log(`Deleted accounts entry: ${money(j.amount)} from ${bookName(j.from)} to ${bookName(j.to)} (${j.date})`);
+    document.querySelectorAll(".modal-backdrop").forEach(el => { if (el.querySelector(`[data-act="del-entry"][data-id="${CSS.escape(id)}"]`)) el.remove(); });
+  },
+  "pay-salary": (name, el) => openSalary({ staff: name, kind: el.dataset.kind }),
+  "acc-start": () => openStartBalances(),
+  "acc-month-end"(ym) { S.ui.accMonth = ym; S.ui.accTab = "close"; },
+  "acc-excel": ym => downloadAccounts(ym || S.ui.accMonth),
+  "acc-print": () => openAccountsPrint(S.ui.accMonth),
+  "acc-check": () => openMonthCheck(S.ui.accMonth),
+  "acc-petty-exp": () => openExpense({ method: "Petty cash" }),
+  "acc-diff"(a) {
+    const ym = S.ui.accMonth, end = lastDay(ym), me = S.monthEnds.find(m => m.id === ym);
+    const short = round(balanceAt(a, end) - num(me?.counts?.[a]));
+    if (short > 0) openExpense({ description: `${bookName(a)}: short at the month-end check`, category: "Other", amount: short, method: { bank: "Bank transfer", cash: "Cash", petty: "Petty cash" }[a], date: end, notes: `Found when checking ${fmtMonth(ym)}` });
+  },
+  async "month-given"() {
+    const ym = S.ui.accMonth, { id, ...rest } = S.monthEnds.find(m => m.id === ym) || {};
+    await store.set("monthEnds", ym, { ...rest, month: ym, givenAt: U.nowISO(), givenBy: who() });
+    await log(`Gave the ${fmtMonth(ym)} accounts to the manager`);
+    U.toast("Marked as given to the manager");
+  },
   async "del-payment"(id) {
     const p = S.payments.find(x => x.id === id);
     if (!(await U.confirmBox(`Delete the payment of ${money(p.amount)} from ${esc(p.memberName || p.payerName)} on ${fmtDate(p.date)}? It stays in the activity log.`, { danger: true, okLabel: "Delete payment" }))) return;
@@ -2651,7 +3289,7 @@ const ACTIONS = {
   "reset-draft"() { S.ui.draft = null; render(); },
   "add-row"(kind) {
     const d = S.ui.draft;
-    const blank = { plans: { name: "", months: 1, kids: "", adults: "" }, extraFees: { name: "", kids: "", adults: "" }, bills: { id: "bill-" + Math.random().toString(36).slice(2, 9), name: "", category: "Rent", amount: "", dueDay: 1, startMonth: U.thisMonth() }, schedule: { day: S.ui.schedDay !== "week" ? S.ui.schedDay : "Mon", from: "17:00", to: "18:00", class: "", group: "Adults – mix" } };
+    const blank = { plans: { name: "", months: 1, kids: "", adults: "" }, extraFees: { name: "", kids: "", adults: "" }, bills: { id: "bill-" + Math.random().toString(36).slice(2, 9), name: "", category: "Rent", amount: "", dueDay: 1, startMonth: U.thisMonth() }, staff: { name: "", role: "", salary: "" }, schedule: { day: S.ui.schedDay !== "week" ? S.ui.schedDay : "Mon", from: "17:00", to: "18:00", class: "", group: "Adults – mix" } };
     (d[kind] ||= []).push(blank[kind]);
     render();
   },
@@ -2672,6 +3310,8 @@ const ACTIONS = {
         <button type="button" class="btn" data-act="new-charge">Kit sale or other charge</button>
         <button type="button" class="btn" data-act="checkin">Check someone in</button>
         <button type="button" class="btn" data-act="new-expense">Add expense or bill</button>
+        <button type="button" class="btn" data-act="acc-new" data-id="transfer">Transfer money (main account ↔ petty cash)</button>
+        <button type="button" class="btn" data-act="pay-salary">Pay a salary or advance</button>
         <button type="button" class="btn" data-act="new-member">Add member</button>
         <button type="button" class="btn" data-act="new-lead">Add trial request</button>
       </div>`,

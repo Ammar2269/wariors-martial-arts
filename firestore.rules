@@ -27,10 +27,11 @@ service cloud.firestore {
     }
 
     // Everything else in the dashboard: staff only. Nothing is readable without signing in.
-    // receipts = receipt details and a small preview; receiptImages = the full-size photos; dailyReports = one per day.
+    // receipts = receipt details and a small preview; receiptImages = the full-size photos; dailyReports = one per day;
+    // journal = money moved between accounts and the accountant's entries; monthEnds = one per month (counts, given to the manager).
     match /{col}/{id} {
       allow read, write: if isAdmin()
-        && col in ['members', 'memberships', 'payments', 'expenses', 'equipment', 'leads', 'handouts', 'attendance', 'settings', 'receipts', 'receiptImages', 'dailyReports'];
+        && col in ['members', 'memberships', 'payments', 'expenses', 'equipment', 'leads', 'handouts', 'attendance', 'settings', 'receipts', 'receiptImages', 'dailyReports', 'journal', 'monthEnds'];
     }
   }
 }
