@@ -262,7 +262,8 @@ table.fin { width: 100%; border-collapse: collapse; font-size: 13.5px; font-vari
 .fin tr.total td { font-weight: 600; border-top: 1px solid var(--text); }
 .fin tr.grand td { font-weight: 700; font-size: 14.5px; border-top: 1px solid var(--text); border-bottom: 3px double var(--text); }
 .fin .neg { color: var(--bad); }
-.acc-tabs { margin-bottom: 14px; }
+.acc-tabs { display: flex; max-width: 100%; overflow-x: auto; scrollbar-width: thin; margin-bottom: 14px; }
+.acc-tabs button { white-space: nowrap; flex: 0 0 auto; }
 .panel-note { margin: 0; padding: 10px 16px 4px; }
 .quick-grid .btn .sub { display: block; font-size: 12px; font-weight: 400; opacity: .8; margin-top: 3px; white-space: normal; }
 .acc-print { font-size: 14px; }
