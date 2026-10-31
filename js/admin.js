@@ -2342,7 +2342,7 @@ function openReceipt(id) {
 const DAILY = [
   { keys: [["enqCall", "Enquiry via call"], ["enqWalk", "Enquiry walk in"], ["callBack", "Call back"]] },
   { title: "Trial session", dash: true, keys: [["trMMA", "MMA"], ["trKick", "Kick boxing"], ["trBoxing", "Boxing"], ["trKalari", "Kalari"], ["trYoga", "Yoga"], ["trBJJ", "BJJ"], ["trOther", "Other", "skip0"]] },
-  { title: "Client", keys: [["clActive", "Active"], ["clInactive", "Inactive"], ["clCancelled", "Cancelled"], ["clFrozen", "Membership frozen"]] },
+  { title: "Client", keys: [["clActive", "Active"], ["clInactive", "Inactive"], ["clFrozen", "Membership frozen"]] },
   { title: "New admission", bullet: true, keys: [["newKids", "Kids"], ["newAdults", "Adults"]] },
   { title: "Equipment required", text: true, keys: [["eqGloves", "Gloves"], ["eqMouth", "Mouth guard"], ["eqAp", "AP guard"], ["eqWraps", "Hand wraps"], ["eqShin", "Shin guards"], ["eqKalari", "Kalari"], ["eqTshirt", "T-shirts"], ["eqYoga", "Yoga"], ["eqBjj", "BJJ"]] },
   { title: "Payment and receipts", bullet: true, money: true, keys: [["payTotal", "Payments received"], ["payBank", "Bank"], ["payCard", "Card"], ["payCash", "Cash"], ["closingReceipt", "Closing receipt no", "text"], ["bankPayments", "Bank payments"], ["expenses", "Expenses"], ["cashBalance", "Cash balance"], ["voucherNos", "Payment voucher no", "text"], ["closingBalance", "Day closing balance"]] }
@@ -2359,6 +2359,7 @@ const numList = list => [...new Set(list.map(v => String(v ?? "").trim()).filter
   .sort((a, b) => (Number(a.replace(/\D/g, "")) || 0) - (Number(b.replace(/\D/g, "")) || 0) || a.localeCompare(b)).join(", ");
 
 // A member's situation on a given day (cancelled / frozen / active / inactive), or null if they hadn't joined yet.
+// Cancelled members stay on the website but aren't counted in the report.
 function clientOn(m, day) {
   if ((m.joinDate || "") > day) return null;
   if (m.status === "cancelled" && (!m.cancelDate || m.cancelDate <= day)) return "cancelled";
@@ -2379,7 +2380,6 @@ function dailyAuto(day) {
   const states = S.members.map(m => clientOn(m, day));
   v.clActive = states.filter(s => s === "active").length;
   v.clInactive = states.filter(s => s === "inactive").length;
-  v.clCancelled = states.filter(s => s === "cancelled").length;
   v.clFrozen = states.filter(s => s === "frozen").length;
   const joined = S.members.filter(m => m.joinDate === day);
   v.newKids = joined.filter(m => m.ageGroup === "Kids").length;
@@ -2397,10 +2397,6 @@ function dailyAuto(day) {
   v.bankPayments = round(sum(xs.filter(x => [...BANK_METHODS, "Card"].includes(x.method)), x => x.amount));
   v.expenses = round(sum(xs, x => x.amount) - v.bankPayments);
   v.voucherNos = numList([...xs.map(x => x.voucherNo), ...S.receipts.filter(r => r.kind === "out" && r.date === day).map(r => r.number)]);
-  // Opening cash = the closing balance of the last saved report before this day.
-  const prev = S.dailyReports.filter(r => r.date < day).sort((a, b) => b.date.localeCompare(a.date))[0];
-  v.openingBalance = prev && prev.values?.closingBalance !== "" && prev.values?.closingBalance != null ? num(prev.values.closingBalance) : "";
-  v.openingFrom = prev ? prev.date : "";
   return v;
 }
 
@@ -2437,8 +2433,7 @@ function openDailyReport(day0) {
         <p class="hint" id="dr-status"></p>
         ${DAILY.map(s => `<fieldset class="dr-sec"><legend>${esc(s.title || "Enquiries")}</legend><div class="dr-fields">
           ${s.keys.map(([k, label, kind]) => field(k, label, s, kind)).join("")}
-          ${s.money ? `<div><label for="dr-openingBalance">Opening cash (yesterday's closing)</label><input id="dr-openingBalance" name="openingBalance" type="number" step="any" inputmode="decimal"></div>` : ""}
-        </div>${s.money ? `<p class="hint">Bank = bank transfers and cheques. Card includes payment links. Bank payments = expenses paid by bank, card or cheque; Expenses = paid in cash or petty cash. Cash balance = cash received − expenses. Day closing balance = opening cash + cash balance.</p>` : s.text ? `<p class="hint">Filled from kit still to hand out. Type how many are needed (or a size, e.g. "2 × 12 oz").</p>` : ""}</fieldset>`).join("")}
+        </div>${s.money ? `<p class="hint">Bank = bank transfers and cheques. Card includes payment links. Bank payments = expenses paid by bank, card or cheque; Expenses = paid in cash or petty cash. Cash balance = cash received − expenses. Day closing balance = payments received − bank payments − expenses, for this day only (nothing from other days).</p>` : s.text ? `<p class="hint">Filled from kit still to hand out. Type how many are needed (or a size, e.g. "2 × 12 oz").</p>` : ""}</fieldset>`).join("")}
         <fieldset class="dr-sec"><legend>Remarks</legend><textarea id="dr-remarks" name="remarks" maxlength="600" placeholder="e.g. Need equipment ASAP"></textarea></fieldset>
       </div>
       <div class="dr-preview"><label for="dr-text">The report</label><textarea id="dr-text" readonly></textarea></div>
@@ -2448,29 +2443,29 @@ function openDailyReport(day0) {
       const f = el.querySelector("form");
       const preview = el.querySelector("#dr-text");
       let edited = new Set();
-      const values = () => { const o = {}; for (const k of [...DAILY_KEYS, "openingBalance", "remarks"]) o[k] = f[k].value.trim() === "" ? "" : f[k].type === "number" ? num(f[k].value) : f[k].value.trim(); return o; };
+      const values = () => { const o = {}; for (const k of [...DAILY_KEYS, "remarks"]) o[k] = f[k].value.trim() === "" ? "" : f[k].type === "number" ? num(f[k].value) : f[k].value.trim(); return o; };
       const derive = () => {
         const n = k => num(f[k].value);
         if (!edited.has("payTotal")) f.payTotal.value = round(n("payBank") + n("payCard") + n("payCash"));
         if (!edited.has("cashBalance")) f.cashBalance.value = round(n("payCash") - n("expenses"));
-        if (!edited.has("closingBalance")) f.closingBalance.value = round(n("openingBalance") + n("cashBalance"));
+        if (!edited.has("closingBalance")) f.closingBalance.value = round(n("payTotal") - n("bankPayments") - n("expenses"));
         preview.value = dailyText(f.date.value, values());
       };
       const load = keepTyped => {
         const day = f.date.value || U.todayISO();
         const saved = S.dailyReports.find(r => r.id === day);
         const auto = dailyAuto(day);
-        if (!keepTyped) edited = new Set(saved?.edited || []);
-        for (const k of [...DAILY_KEYS, "openingBalance"]) f[k].value = edited.has(k) ? saved?.values?.[k] ?? "" : auto[k] ?? "";
+        if (!keepTyped) edited = new Set((saved?.edited || []).filter(k => DAILY_KEYS.includes(k)));
+        for (const k of DAILY_KEYS) f[k].value = edited.has(k) ? saved?.values?.[k] ?? "" : auto[k] ?? "";
         if (!keepTyped) f.remarks.value = saved?.values?.remarks ?? "";
-        el.querySelector("#dr-status").innerHTML = `${saved ? `Saved ${U.fmtWhen(saved.savedAt)}${saved.savedBy ? ` by ${esc(saved.savedBy)}` : ""}. Numbers you typed are kept; the rest update from the system.` : "Not saved yet."}${auto.openingFrom ? ` Opening cash is the closing balance of ${fmtDate(auto.openingFrom)}.` : " No earlier report saved, so type the opening cash once."}`;
+        el.querySelector("#dr-status").innerHTML = `${saved ? `Saved ${U.fmtWhen(saved.savedAt)}${saved.savedBy ? ` by ${esc(saved.savedBy)}` : ""}. Numbers you typed are kept; the rest update from the system.` : "Not saved yet."} Money is counted for this day only.`;
         derive();
       };
       f.addEventListener("input", e => { const k = e.target.name; if (k && k !== "date") { edited.add(k); derive(); } });
       f.date.addEventListener("change", () => load(false));
       el.querySelector("#dr-reset").addEventListener("click", () => {
-        // Keep what can only be typed (equipment, opening cash, remarks); everything else back to the system's numbers.
-        edited = new Set([...edited].filter(k => k.startsWith("eq") || k === "openingBalance"));
+        // Keep what can only be typed (equipment, remarks); everything else back to the system's numbers.
+        edited = new Set([...edited].filter(k => k.startsWith("eq")));
         load(true);
         U.toast("Numbers refreshed from the system");
       });
